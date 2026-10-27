@@ -268,3 +268,35 @@ func TestWithoutKindKeepsOrder(t *testing.T) {
 		t.Fatal("WithoutKind must not mutate the input")
 	}
 }
+
+func TestOutlineInterfaceMembers(t *testing.T) {
+	code := `package calc
+
+type base interface {
+	Ping() error
+}
+
+type Store interface {
+	Get(key string) (int, error)
+	base
+}
+`
+	path, src := prepare(t, code)
+	out := Outline(path, src, OutlineOptions{})
+	if !out.OK {
+		t.Fatalf("unexpected diagnostics: %+v", out.Diagnostics)
+	}
+	byID := map[string]Symbol{}
+	for _, s := range out.Symbols {
+		byID[s.ID] = s
+	}
+	if got := byID["calc.base.Ping"].Signature; got != "Ping() error" {
+		t.Fatalf("unexpected interface method signature %q", got)
+	}
+	if got := byID["calc.Store.Get"].Signature; got != "Get(key string) (int, error)" {
+		t.Fatalf("unexpected interface method signature %q", got)
+	}
+	if byID["calc.Store.Get"].Kind != "interface_method" {
+		t.Fatalf("unexpected kind: %+v", byID["calc.Store.Get"])
+	}
+}

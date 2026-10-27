@@ -194,15 +194,18 @@ func typeMembers(pkg string, fset *token.FileSet, sp *ast.TypeSpec, opts Outline
 			})
 		}
 	case *ast.InterfaceType:
-		for _, field := range t.Fields.List {
+		for _, field := range t.Methods.List {
 			if len(field.Names) == 0 {
 				continue // embedded interface
 			}
 			pos := fset.Position(field.Names[0].Pos())
+			// format.Node prints a FuncType with its `func` keyword; an interface
+			// method is written without it, so keep the reference honest.
+			signature := strings.TrimPrefix(compactText(fset, field.Type), "func")
 			members = append(members, Symbol{
 				ID:        pkg + "." + sp.Name.Name + "." + field.Names[0].Name,
 				Kind:      "interface_method",
-				Signature: field.Names[0].Name + compactText(fset, field.Type),
+				Signature: field.Names[0].Name + signature,
 				Line:      pos.Line,
 				Column:    pos.Column,
 				Exported:  field.Names[0].IsExported(),
