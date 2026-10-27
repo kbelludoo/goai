@@ -1,0 +1,6 @@
+{
+  "action": "replace_binary_operator",
+  "target": { "function": "Withdraw", "assignment_lhs": "w.Balance" },
+  "expected_operator": "+",
+  "new_operator": "-"
+}
