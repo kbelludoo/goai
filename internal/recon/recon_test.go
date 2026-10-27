@@ -1,6 +1,7 @@
 package recon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,85 +13,111 @@ import (
 
 func fixture(t *testing.T, source string) (string, []byte, agentproto.RecognitionRequest) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "wallet.go")
+	path := filepath.Join(t.TempDir(), "wallet.go")
 	src := []byte(source)
 	if err := os.WriteFile(path, src, 0644); err != nil {
 		t.Fatal(err)
 	}
 	return path, src, agentproto.RecognitionRequest{
 		TransactionID: "tx-wallet", Intent: agentproto.Intent{Kind: agentproto.FixArithmeticLogic},
-		Selector: agentproto.SemanticSelector{
-			File: "wallet.go", Declaration: "Withdraw", AssignmentLHS: "w.Balance", MatchPolicy: "exactly_one", FileSHA256: engine.SHA(src),
-		},
+		Selector: agentproto.SemanticSelector{File: path, Declaration: "Withdraw", AssignmentLHS: "w.Balance", MatchPolicy: "exactly_one", FileSHA256: engine.SHA(src)},
 	}
 }
-
 func TestDiscoverBoundedCandidateAndNoWrite(t *testing.T) {
 	path, src, req := fixture(t, `package wallet
-    type Wallet struct{ Balance int }
-    func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
-	res, err := Discover(path, src, req)
+ type Wallet struct{ Balance int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
+	catalog, err := Discover(path, src, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Candidates) != 1 {
-		t.Fatalf("want one candidate: %+v", res)
+	menu := catalog.Response()
+	if len(menu.Candidates) != 1 {
+		t.Fatalf("expected one candidate: %+v", menu)
 	}
-	c, err := res.Choose(res.Candidates[0].ID, engine.SHA(src))
+	serialized, err := json.Marshal(menu)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Patch.NewOperator != "-" {
-		t.Fatalf("unexpected candidate: %+v", c)
+	if strings.Contains(string(serialized), "ast_patch") {
+		t.Fatal("discovery published full patch to AI")
 	}
-	onDisk, err := os.ReadFile(path)
+	c, patch, err := catalog.Resolve(menu.Candidates[0].ID, req.TransactionID, engine.SHA(src))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(onDisk) != string(src) {
-		t.Fatal("discovery edited original")
+	if c.Digest == "" || patch.NewOperator != "-" {
+		t.Fatal("wrong candidate")
 	}
-	r := engine.Apply(path, src, c.Patch)
-	if !r.OK || !strings.Contains(r.UpdatedSource, "w.Balance - amount") {
-		t.Fatalf("candidate not applicable: %+v", r)
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(disk) != string(src) {
+		t.Fatal("discovery modified disk")
+	}
+	result := engine.Apply(path, src, patch)
+	if !result.OK || !strings.Contains(result.UpdatedSource, "w.Balance - amount") {
+		t.Fatalf("unusable patch: %+v", result)
 	}
 }
-
-func TestRejectStaleAndNoGuessing(t *testing.T) {
+func TestRejectStaleAndUnknownIntent(t *testing.T) {
 	path, src, req := fixture(t, `package wallet
-    type Wallet struct{ Balance int }
-    func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
+ type Wallet struct{ Balance int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
 	req.Selector.FileSHA256 = strings.Repeat("0", 64)
 	if _, err := Discover(path, src, req); err == nil {
 		t.Fatal("stale selector accepted")
 	}
 	req.Selector.FileSHA256 = engine.SHA(src)
-	req.Intent.Kind = "invented"
+	req.Intent.Kind = "invalid"
 	if _, err := Discover(path, src, req); err == nil {
-		t.Fatal("unknown intent accepted")
+		t.Fatal("invalid intent accepted")
 	}
 }
-
-func TestAmbiguousAssignmentsProduceNoActionableCandidate(t *testing.T) {
+func TestAmbiguousAssignmentsProduceNoCandidate(t *testing.T) {
 	path, src, req := fixture(t, `package wallet
-    type Wallet struct{ Balance int }
-    func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount; w.Balance = w.Balance + amount }`)
-	res, err := Discover(path, src, req)
+ type Wallet struct{ Balance int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount; w.Balance = w.Balance + amount }`)
+	catalog, err := Discover(path, src, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Candidates) != 0 || len(res.Diagnostics) == 0 {
-		t.Fatalf("should reject ambiguous candidate: %+v", res)
+	menu := catalog.Response()
+	if len(menu.Candidates) != 0 || len(menu.Diagnostics) == 0 {
+		t.Fatalf("ambiguous operation offered: %+v", menu)
 	}
 }
-
-func TestUnknownReceiverQualifiedSelectorRejected(t *testing.T) {
+func TestReceiverQualifiedSelectorRejected(t *testing.T) {
 	path, src, req := fixture(t, `package wallet
-    type Wallet struct{ Balance int }
-    func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
+ type Wallet struct{ Balance int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
 	req.Selector.Declaration = "(*Wallet).Withdraw"
 	if _, err := Discover(path, src, req); err == nil {
-		t.Fatal("receiver qualified support must not be claimed")
+		t.Fatal("unimplemented receiver symbol should fail")
+	}
+}
+func TestSameBasenameDifferentDirectoryRejected(t *testing.T) {
+	path, src, req := fixture(t, `package wallet
+ type Wallet struct{ Balance int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount }`)
+	req.Selector.File = filepath.Join(filepath.Dir(path), "elsewhere", "wallet.go")
+	if _, err := Discover(path, src, req); err == nil {
+		t.Fatal("basename collision accepted")
+	}
+}
+func TestMaxCandidateCapFlag(t *testing.T) {
+	path, src, req := fixture(t, `package wallet
+ type Wallet struct{ Balance int; Fee int }
+ func (w *Wallet) Withdraw(amount int) { w.Balance = w.Balance + amount; w.Fee = w.Fee - amount }`)
+	req.Selector.AssignmentLHS = ""
+	req.MaxCandidates = 1
+	catalog, err := Discover(path, src, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	menu := catalog.Response()
+	if len(menu.Candidates) != 1 || !menu.Capped {
+		t.Fatalf("expected bounded menu with cap indicator: %+v", menu)
 	}
 }

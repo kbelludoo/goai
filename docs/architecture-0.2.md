@@ -6,25 +6,52 @@ The v0.1 CLI and mutation engine are unchanged by this PR. New packages are
 `internal/agentproto` (JSON contracts, lifecycle/gates) and `internal/recon`
 (a read-only recognizer that proposes existing engine-supported `+`/`-` edits).
 
-## Contract
+## Contract (revision-bound, lazy catalogue)
 
-1. `RecognitionRequest` binds a `tx_id`, restricted `Intent`, `SemanticSelector`
-   and *exact full-file SHA-256 revision*. Selectors use the `exactly_one` policy.
-2. `recon.Discover` parses the source and enumerates **bounded, mechanically
-   generated candidates**, cross-checking each with `engine.Apply` to avoid
-   proposing an unsupported or ambiguous patch. No user-code execution.
-3. `RecognitionResponse` supplies version-scoped candidate IDs, explicit patches,
-   and structured diagnostics. `Choose` refuses stale IDs or duplicate matches.
-4. The `Transaction` draft moves `pending -> proposed` only with a selected
-   candidate, and `proposed -> validated` only via `MarkValidated` after an
-   explicit report of successful syntax, type, vet, build and test gates.
-   Contracts are required when postconditions are specified. `RequirePass`
-   refuses absent, duplicate, skipped or failing required gates. A future
-   executor must produce **trusted** reports and enforce commit preconditions.
-5. These types are **not attestations**. Nothing in this PR executes tests,
-   writes files, implements secure isolation, or commits to Git. A future trusted
-   executor must generate evidence, enforce optimistic locking at commit, and
-   prevent untrusted agents from forging validation/transaction state.
+1. `RecognitionRequest` binds a transaction ID, intent, exact normalized source
+   path, declaration, selector and SHA-256 revision. Ambiguous edits are not
+   actionable. Receiver-qualified symbols are not yet supported.
+2. `recon.Discover` runs the existing `engine.Apply` **preflight** for each
+   syntactically supported mutation. It returns a `CandidateCatalog`, held only
+   by trusted in-process code. After discovery, `Seal` freezes its registry;
+   the recognizer never executes untrusted tests.
+3. An agent receives **only** `catalog.Response()`: summary, opaque candidate ID,
+   digest, source revision, output digest, diagnostics and `capped` flag.
+   Crucially, **no raw AST patch is included in this response**.
+4. When the agent selects an ID, `Transaction.SelectCandidate(catalog, id)`
+   resolves it from that sealed local registry. It refuses unknown IDs and
+   stale file hashes. The trusted engine can use `catalog.Resolve` to obtain
+   the full patch; client-supplied `Candidate` objects must never authorize it.
+5. `MarkValidated` requires that the structural report identify the exact
+   transaction, candidate ID/digest, original revision, expected output digest,
+   required gates and validation policy hash. This **does not authenticate**
+   the report or execute any checks. Calling it with client-generated JSON
+   remains unsafe. The `Validated` state is advisory until a trusted validator
+   and private authoritative transaction manager exist.
+6. No code in this PR commits files or attests that the tests really ran.
+   Implementing trusted execution, provenance, immutable authoritative state
+   and compare-and-swap commits belongs to the next increments.
+
+## Lazy catalogue response example
+
+```json
+{
+  "tx_id": "tx-wallet-01",
+  "source_sha256": "<snapshot SHA-256>",
+  "candidates": [{
+    "id": "mut_<canonical candidate digest>",
+    "tx_id": "tx-wallet-01",
+    "source_sha256": "<snapshot SHA-256>",
+    "digest": "<SHA-256 of transaction, revision, full patch, output>",
+    "output_sha256": "<expected output SHA-256>",
+    "summary": "Change + to - in assignment to w.Balance"
+  }]
+}
+```
+
+Only an ID needs to return over the agent protocol. A future production executor
+must re-resolve/recheck the revision and must not accept user-supplied patches,
+validation statuses or candidate registries as trusted authority.
 
 ## JSON request example
 
@@ -32,7 +59,7 @@ The v0.1 CLI and mutation engine are unchanged by this PR. New packages are
 {
   "tx_id": "tx-wallet-01",
   "selector": {
-    "file": "wallet.go",
+    "file": "/absolute/path/to/wallet.go",
     "declaration": "Withdraw",
     "assignment_lhs": "w.Balance",
     "file_sha256": "<64 hex digits from the real file>",
@@ -57,8 +84,12 @@ savings, zero regressions, or universal correctness is claimed.
   only to the degree maintained by the codebase; name reuse and refactoring
   require re-resolution.
 - The source hash is a snapshot precondition, **not** an enduring node ID.
-- Candidate IDs are deliberately version-scoped: after any file change the
-  recognizer must be rerun; IDs are not portable to the new revision.
+- Candidate IDs are derived from a canonical digest of the transaction ID,
+  exact patch, original revision and preflight output hash. After any file
+  change the recognizer must be rerun. The sealed catalogue rejects late
+  registration; returned response summaries are detached value copies.
+- Current selectors require the exact normalized source path; repository-root
+  mapping and safe realpath/symlink handling remain future work.
 - Existing `engine.Apply` only understands unqualified function names; method
   receiver-qualified selectors are explicitly rejected until supported.
 - An ambiguous engine mutation is excluded from actionable candidates, not
@@ -66,7 +97,10 @@ savings, zero regressions, or universal correctness is claimed.
 
 ## Next implementation increments
 
-1. Transaction manager using trusted, immutable stored states and compare-and-
+1. Authoritative transaction manager with private states and trusted validation
+   attestation. The exported `Transaction` is still only a draft DTO; code
+   executing untrusted agent messages must **not** treat its `State` as an
+   authorization decision. Follow with compare-and-
    swap on source revision when committing. Durability and crash recovery need
    explicit tests (the current `WriteAtomic` is **not** a multi-file transaction).
 2. True isolated test executor. Temp folders, Go `context` timeouts, and process

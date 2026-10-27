@@ -100,7 +100,7 @@ establish the agent's reliability.
 
 The module path is `github.com/kbelludoo/goai`. A GitHub Actions workflow
 runs `go test ./...`, `go vet ./...` and the end-to-end demonstration on pushes
-and pull requests. **The workflow has not been verified on GitHub yet.**
+and pull requests. The initial CI run passed on GitHub; future PR runs must still be checked.
 
 ## License
 
@@ -120,3 +120,18 @@ attestations, durable transaction commits, or improved success/token benchmarks.
 Track implementation in [transactions](https://github.com/kbelludoo/goai/issues/1),
 [sandbox](https://github.com/kbelludoo/goai/issues/2), and
 [recognition](https://github.com/kbelludoo/goai/issues/3).
+
+### Candidate-integrity hardening (draft PR)
+
+The 0.2 draft now supports a **sealed in-process candidate catalogue** and
+compact agent-facing summaries. `recon.Discover` returns a local registry;
+serialize `registry.Response()` to an agent, then accept only its candidate
+**ID** and resolve it back against that original registry. The digest binds
+the transaction, source revision, entire patch and expected output revision.
+
+`ValidationReport` structurally binds the intended candidate and checks the
+required gate names, but **reports are not authentic evidence**. No validator,
+sandbox, durable authoritative state or safe commit protocol has been added.
+Do not use any exported `Transaction.State` value as authorization for changes
+written by an untrusted client. The 0.1 CLI still provides its original
+manual `-write` behavior, which has *not* gained sandbox validation.
