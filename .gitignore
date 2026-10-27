@@ -1,0 +1,17 @@
+# Go artifacts
+/bin/
+/dist/
+/build/
+*.exe
+*.test
+*.out
+coverage.out
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# GoAI temporary files
+.goai-*.tmp
