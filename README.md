@@ -106,3 +106,17 @@ and pull requests. **The workflow has not been verified on GitHub yet.**
 
 No license has been selected yet. Choose an open-source license deliberately
 before encouraging external redistribution.
+
+
+## GoAI 0.2 protocol draft (experimental)
+
+See [the 0.2 architecture RFC](docs/architecture-0.2.md) for a proposed
+transaction lifecycle and recognition protocol. The new `internal/agentproto`
+and `internal/recon` packages implement **data contracts, guard checks and
+read-only candidate discovery**. They are not wired into the GoAI CLI.
+
+The draft does **not** provide a secure test sandbox, trusted validation
+attestations, durable transaction commits, or improved success/token benchmarks.
+Track implementation in [transactions](https://github.com/kbelludoo/goai/issues/1),
+[sandbox](https://github.com/kbelludoo/goai/issues/2), and
+[recognition](https://github.com/kbelludoo/goai/issues/3).
