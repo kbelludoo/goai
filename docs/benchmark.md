@@ -12,6 +12,14 @@ MVP only supports a small class of operator edits**, so running only those
 tasks would unfairly favor C. Include tasks it cannot complete, and report
 coverage as well as conditional success.
 
+## Reconnaissance is an arm, not a free win
+
+`goai context` (0.2) replaces "read the file" with a bounded outline. Measure it
+separately from edit accuracy: report prompt tokens per task with full-file reads
+versus `context`, and check that the outline does not hide the information a
+solution needs. A cheaper context that raises retries is a regression, so always
+report the two numbers together.
+
 ## Measure
 
 - First-pass functional test pass rate and final task success rate.
