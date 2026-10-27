@@ -5,107 +5,171 @@
 //	goai context -file f.go [-brief] [-typecheck]
 //	goai check   -file f.go
 //
-// The first positional argument selects the mode; omitting it keeps the original
+// The mode is the first positional argument; omitting it keeps the original
 // `goai -file f.go -patch p.json` invocation working.
 package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/kbelludoo/goai/internal/engine"
 )
 
-func main() {
-	file := flag.String("file", "", "Go file to inspect or update")
-	patchFile := flag.String("patch", "", "JSON patch instruction")
-	write := flag.Bool("write", false, "write the validated candidate to source")
-	brief := flag.Bool("brief", false, "context: omit doc comments and signatures")
-	typecheck := flag.Bool("typecheck", false, "context: also run the type-checker")
-	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: goai [patch|context|check] -file file.go [-patch patch.json] [-write] [-brief] [-typecheck]")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
+const usageLine = "usage: goai [patch|context|check] -file file.go [-patch patch.json] [-write] [-brief] [-typecheck]"
 
-	mode := "patch"
-	if flag.NArg() > 0 {
-		mode = flag.Arg(0)
-		if flag.NArg() > 1 {
-			usageError("GOAI-USAGE-002", "unexpected arguments: "+fmt.Sprint(flag.Args()[1:]))
+// options is the parsed command line. It exists as a value so that mode and
+// flag interaction is testable without exec'ing the binary.
+type options struct {
+	mode      string
+	file      string
+	patch     string
+	write     bool
+	brief     bool
+	typecheck bool
+}
+
+// usageErr carries a stable diagnostic code to the JSON envelope.
+type usageErr struct {
+	code    string
+	message string
+}
+
+func (e *usageErr) Error() string { return e.message }
+
+// parseArgs accepts the mode either before or after nothing at all: the first
+// non-flag argument selects the mode, and the remaining flags are parsed after
+// it. Parsing flags first would stop at the mode and silently ignore -file.
+func parseArgs(args []string) (options, error) {
+	opts := options{mode: "patch"}
+	fs := flag.NewFlagSet("goai", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, usageLine)
+		fs.PrintDefaults()
+	}
+	file := fs.String("file", "", "Go file to inspect or update")
+	patch := fs.String("patch", "", "JSON patch instruction")
+	write := fs.Bool("write", false, "write the validated candidate to source")
+	brief := fs.Bool("brief", false, "context: omit doc comments and signatures")
+	typecheck := fs.Bool("typecheck", false, "context: also run the type-checker")
+
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		opts.mode = args[0]
+		args = args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return opts, err
 		}
+		return opts, &usageErr{code: "GOAI-USAGE-004", message: err.Error()}
 	}
-	if *file == "" {
-		usageError("GOAI-USAGE-001", "usage: goai [patch|context|check] -file file.go [-patch patch.json] [-write]")
+	if fs.NArg() > 0 {
+		return opts, &usageErr{code: "GOAI-USAGE-002", message: "unexpected arguments: " + strings.Join(fs.Args(), " ")}
 	}
-	source, err := os.ReadFile(*file)
-	if err != nil {
-		usageError("GOAI-IO-004", err.Error())
+	opts.file, opts.patch, opts.write, opts.brief, opts.typecheck = *file, *patch, *write, *brief, *typecheck
+	switch opts.mode {
+	case "patch", "context", "check":
+	default:
+		return opts, &usageErr{code: "GOAI-USAGE-003", message: "unknown mode " + opts.mode + ": expected patch, context, or check"}
 	}
+	if opts.file == "" {
+		return opts, &usageErr{code: "GOAI-USAGE-001", message: usageLine}
+	}
+	return opts, nil
+}
 
-	switch mode {
+func main() {
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		var usage *usageErr
+		if errors.As(err, &usage) {
+			emit(engine.Result{
+				Protocol:    engine.Protocol,
+				Diagnostics: []engine.Diagnostic{{Code: usage.code, Message: usage.message}},
+			})
+			os.Exit(1)
+		}
+		os.Exit(0) // flag.ErrHelp already printed usage
+	}
+	source, err := os.ReadFile(opts.file)
+	if err != nil {
+		emit(engine.Result{
+			Protocol:    engine.Protocol,
+			Diagnostics: []engine.Diagnostic{{Code: "GOAI-IO-004", Message: err.Error()}},
+		})
+		os.Exit(1)
+	}
+	switch opts.mode {
 	case "context":
-		out := engine.Outline(*file, source, engine.OutlineOptions{Brief: *brief, Typecheck: *typecheck})
-		printJSON(out)
+		out := engine.Outline(opts.file, source, engine.OutlineOptions{Brief: opts.brief, Typecheck: opts.typecheck})
+		emit(out)
 		if !out.OK {
 			os.Exit(2)
 		}
 	case "check":
-		out := engine.Check(*file, source)
-		printJSON(out)
+		out := engine.Check(opts.file, source)
+		emit(out)
 		if !out.OK {
 			os.Exit(2)
 		}
-	case "patch":
-		runPatch(*file, *patchFile, source, *write)
 	default:
-		usageError("GOAI-USAGE-003", "unknown mode "+mode+": expected patch, context, or check")
+		runPatch(opts, source)
 	}
 }
 
-func runPatch(path, patchPath string, original []byte, write bool) {
-	if patchPath == "" {
-		usageError("GOAI-USAGE-001", "patch mode needs -patch patch.json")
+func runPatch(opts options, original []byte) {
+	if opts.patch == "" {
+		emit(engine.Result{
+			Protocol:    engine.Protocol,
+			Diagnostics: []engine.Diagnostic{{Code: "GOAI-USAGE-001", Message: "patch mode needs -patch patch.json"}},
+		})
+		os.Exit(1)
 	}
-	patchBytes, err := os.ReadFile(patchPath)
+	patchBytes, err := os.ReadFile(opts.patch)
 	if err != nil {
-		usageError("GOAI-IO-003", err.Error())
+		emit(engine.Result{
+			Protocol:    engine.Protocol,
+			Diagnostics: []engine.Diagnostic{{Code: "GOAI-IO-003", Message: err.Error()}},
+		})
+		os.Exit(1)
 	}
 	parsed, err := engine.ParsePatch(patchBytes)
 	if err != nil {
-		usageError("GOAI-PATCH-001", err.Error())
+		emit(engine.Result{
+			Protocol:    engine.Protocol,
+			Diagnostics: []engine.Diagnostic{{Code: "GOAI-PATCH-001", Message: err.Error()}},
+		})
+		os.Exit(1)
 	}
-	out := engine.Apply(path, original, parsed)
+	out := engine.Apply(opts.file, original, parsed)
 	if !out.OK {
-		printJSON(out)
+		emit(out)
 		os.Exit(2)
 	}
-	if write {
-		if err := engine.WriteAtomic(path, original, out.UpdatedSource); err != nil {
+	if opts.write {
+		if err := engine.WriteAtomic(opts.file, original, out.UpdatedSource); err != nil {
 			out.OK = false
-			out.Diagnostics = append(out.Diagnostics, engine.Diagnostic{Code: "GOAI-WRITE-001", Message: err.Error(), Hint: "re-read the file; it changed after validation", Retryable: true})
-			printJSON(out)
+			out.Diagnostics = append(out.Diagnostics, engine.Diagnostic{
+				Code:      "GOAI-WRITE-001",
+				Message:   err.Error(),
+				Hint:      "re-read the file; it changed after validation",
+				Retryable: true,
+			})
+			emit(out)
 			os.Exit(3)
 		}
 		out.Written = true
 		out.UpdatedSource = ""
 		out.NextActions = engine.WithoutKind(out.NextActions, "apply_write")
 	}
-	printJSON(out)
+	emit(out)
 }
 
-func usageError(code, message string) {
-	printJSON(engine.Result{
-		Protocol:    engine.Protocol,
-		OK:          false,
-		Diagnostics: []engine.Diagnostic{{Code: code, Message: message, Retryable: false}},
-	})
-	os.Exit(1)
-}
-
-func printJSON(v any) {
+func emit(v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
