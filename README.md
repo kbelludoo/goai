@@ -135,3 +135,15 @@ sandbox, durable authoritative state or safe commit protocol has been added.
 Do not use any exported `Transaction.State` value as authorization for changes
 written by an untrusted client. The 0.1 CLI still provides its original
 manual `-write` behavior, which has *not* gained sandbox validation.
+
+## Private transaction manager (0.2 draft)
+
+`internal/txmanager` now contains an **in-process fail-closed state-machine
+prototype** with CSPRNG opaque capabilities, a sealed candidate catalogue,
+whole-file locks, version checks, one-time commit capabilities and process-local
+hash-chained audit events. The public `NewManager` intentionally has **no
+privileged validator**, so it **cannot approve or commit** user code. Tests
+exercise the positive path only with a synthetic *in-package* validator.
+The project has **no secure sandbox** or durable transaction manager yet.
+See [transaction manager design](docs/txmanager-0.2.md) for guarantees and
+limitations.
