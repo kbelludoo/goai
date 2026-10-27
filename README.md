@@ -80,6 +80,8 @@ relevant, a located position. Ambiguity and precondition failures also return
 `candidates`: each candidate is a complete `retry_target` that can be sent back
 as `target`, so a refusal never dead-ends a loop.
 
+Abridged (`file`, `line`, `column` and the untruncated hint are also present):
+
 ```json
 {
   "code": "GOAI-AMBIGUOUS-001",
@@ -152,7 +154,7 @@ establish the agent's reliability. See
 
 The module path is `github.com/kbelludoo/goai`. A GitHub Actions workflow
 runs `go test ./...`, `go vet ./...` and the end-to-end demonstration on pushes
-and pull requests. **The workflow has not been verified on GitHub yet.**
+and pull requests; the 0.2 protocol commit is green on GitHub Actions.
 
 ## License
 
