@@ -21,6 +21,7 @@ func TestLaunchSequencingAndEnvIsolation(t *testing.T) {
 	err := launchPrepared("/a", "/bin/safe", []string{"/bin/safe"},
 		func(string) error { events = append(events, "check"); return nil },
 		func(string) error { events = append(events, "join"); return nil },
+		func(...int) error { events = append(events, "scrub"); return nil },
 		func(path string, args, env []string) error {
 			events = append(events, "exec")
 			if path != "/bin/safe" || args[0] != path {
@@ -34,13 +35,13 @@ func TestLaunchSequencingAndEnvIsolation(t *testing.T) {
 			}
 			return nil
 		})
-	if err != nil || !reflect.DeepEqual(events, []string{"check", "join", "exec"}) {
+	if err != nil || !reflect.DeepEqual(events, []string{"check", "join", "scrub", "exec"}) {
 		t.Fatalf("bad execution sequence: %v %v", events, err)
 	}
 }
 func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 	marker := errors.New("failed")
-	for _, phase := range []string{"check", "join"} {
+	for _, phase := range []string{"check", "join", "scrub"} {
 		var events []string
 		err := launchPrepared("/a", "/bin/safe", []string{"/bin/safe"},
 			func(string) error {
@@ -53,6 +54,13 @@ func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 			func(string) error {
 				events = append(events, "join")
 				if phase == "join" {
+					return marker
+				}
+				return nil
+			},
+			func(...int) error {
+				events = append(events, "scrub")
+				if phase == "scrub" {
 					return marker
 				}
 				return nil

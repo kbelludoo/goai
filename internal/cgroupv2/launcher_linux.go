@@ -215,6 +215,39 @@ func joinSelf(target string) error {
 	return nil
 }
 
+// closeInheritedFDs closes every descriptor above stderr that is not explicitly
+// kept. syscall.Exec replaces the process image but does NOT close descriptors
+// that lack FD_CLOEXEC: without this step the confined workload inherits the
+// launcher's log files, sockets and any other resource the service happened to
+// have open. Closing is stronger than setting FD_CLOEXEC, because it also
+// covers descriptors opened by code that forgot the flag.
+func closeInheritedFDs(keep ...int) error {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		// Without /proc we cannot enumerate, and silently skipping would leave
+		// the guarantee unmet, so this is a refusal rather than a warning.
+		return fmt.Errorf("%w: cannot enumerate descriptors: %v", ErrLaunchDenied, err)
+	}
+	allowed := map[int]bool{}
+	for _, fd := range append([]int{0, 1, 2}, keep...) {
+		allowed[fd] = true
+	}
+	var firstErr error
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		if err != nil || allowed[fd] {
+			continue
+		}
+		if err := syscall.Close(fd); err != nil && !errors.Is(err, syscall.EBADF) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("%w: %v", ErrLaunchDenied, firstErr)
+	}
+	return nil
+}
+
 // ExecPrepared is the privileged launch boundary. Only trusted launcher code
 // can choose targetPath and argv. No untrusted workload is run until AFTER
 // the process has joined and verified its cgroup. syscall.Exec preserves PID.
@@ -228,19 +261,23 @@ func ExecPrepared(groupPath, targetPath string, argv []string) error {
 	if err != nil || st.IsDir() || st.Mode()&0111 == 0 {
 		return errors.Join(ErrLaunchDenied, err)
 	}
-	return launchPrepared(groupPath, targetPath, argv, verifyTarget, joinSelf, syscall.Exec)
+	return launchPrepared(groupPath, targetPath, argv, verifyTarget, joinSelf, closeInheritedFDs, syscall.Exec)
 }
 
-// launchPrepared enforces check -> self-migration -> exec, in that order.
-// Dependencies are injectable ONLY to exercise sequencing in unit tests;
-// production always uses the real cgroup kernel API and syscall.Exec.
+// launchPrepared enforces check -> self-migration -> descriptor scrub -> exec,
+// in that order. Dependencies are injectable ONLY to exercise sequencing in unit
+// tests; production always uses the real cgroup kernel API and syscall.Exec.
 func launchPrepared(groupPath, targetPath string, argv []string,
 	check func(string) error, join func(string) error,
+	scrub func(...int) error,
 	replace func(string, []string, []string) error) error {
 	if err := check(groupPath); err != nil {
 		return err
 	}
 	if err := join(groupPath); err != nil {
+		return err
+	}
+	if err := scrub(); err != nil {
 		return err
 	}
 	// Strip host credentials/proxy settings. The real sandbox must also filter
