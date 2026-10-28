@@ -80,7 +80,7 @@ func TestBubblewrapRealIntegrationOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("isolation probe fail closed: %v", err)
 	}
-	if report.Backend != "bubblewrap" || report.Child.HostReachable || report.Child.SentinelReadable {
+	if report.Backend != "bubblewrap" || report.Child.HostReachable || report.Child.SentinelReadable || !report.ProcessContained {
 		t.Fatalf("failed audit: %+v", report)
 	}
 	t.Logf("verified independent namespaces: host=%+v child=%+v", report.Host, report.Child)

@@ -20,9 +20,10 @@ var (
 
 type HostNamespaces struct{ Net, Mount, PID string }
 type Report struct {
-	Host    HostNamespaces
-	Child   isolationprobe.Observation
-	Backend string
+	Host             HostNamespaces
+	Child            isolationprobe.Observation
+	Backend          string
+	ProcessContained bool
 }
 
 // Auditor owns failure state. A failed audit quarantines this instance.
