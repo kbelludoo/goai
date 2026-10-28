@@ -43,15 +43,18 @@ func checkGroupIdentity(fd int) error {
 	if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
 		return fmt.Errorf("%w: not a directory", ErrLaunchDenied)
 	}
-	var fs syscall.Statfs_t
-	if err := syscall.Fstatfs(fd, &fs); err != nil || uint64(fs.Type) != cgroup2SuperMagic {
-		return fmt.Errorf("%w: not on cgroup2", ErrLaunchDenied)
-	}
+	// Ownership and permissions come before the filesystem identity: when both
+	// are wrong, the actionable problem is "this is not yours", not "this is not
+	// a cgroup", and an operator should not have to guess which one to fix.
 	if st.Uid != uint32(os.Geteuid()) {
 		return fmt.Errorf("%w: owned by uid %d, not %d", ErrGroupNotOwned, st.Uid, os.Geteuid())
 	}
 	if st.Mode&0022 != 0 {
 		return fmt.Errorf("%w: mode %04o allows group or other writes", ErrGroupNotOwned, st.Mode&07777)
+	}
+	var fs syscall.Statfs_t
+	if err := syscall.Fstatfs(fd, &fs); err != nil || uint64(fs.Type) != cgroup2SuperMagic {
+		return fmt.Errorf("%w: not on cgroup2", ErrLaunchDenied)
 	}
 	return nil
 }

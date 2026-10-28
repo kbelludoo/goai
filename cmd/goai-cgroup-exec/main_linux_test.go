@@ -49,7 +49,12 @@ func TestUntrustworthyAuthorityRefuses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "authority.json")
 	raw := []byte(`{"requester_uids":[0],"cgroup_roots":["/a"],"target_dirs":["/b"],"max_argv":4}`)
-	if err := os.WriteFile(path, raw, 0666); err != nil {
+	// WriteFile is masked by umask, so set the permissive mode explicitly; the
+	// point of the test is a policy file other users could rewrite.
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0666); err != nil {
 		t.Fatal(err)
 	}
 	out, code := runLauncher(t, []string{"GOAI_AUTHORITY_CONFIG=" + path}, nil)

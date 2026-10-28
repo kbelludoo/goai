@@ -15,7 +15,7 @@ import (
 func TestOpenExecutablePinsRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "helper.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0644); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	fd, err := openExecutable(script)

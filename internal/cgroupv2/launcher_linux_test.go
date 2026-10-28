@@ -59,7 +59,13 @@ func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 				}
 				return nil
 			},
-			func(string) (int, error) { events = append(events, "open"); return 7, nil },
+			func(string) (int, error) {
+				events = append(events, "open")
+				if phase == "open" {
+					return -1, marker
+				}
+				return 7, nil
+			},
 			func(...int) error {
 				events = append(events, "scrub")
 				if phase == "scrub" {
