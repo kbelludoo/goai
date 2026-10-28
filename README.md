@@ -106,3 +106,14 @@ and pull requests. **The workflow has not been verified on GitHub yet.**
 
 No license has been selected yet. Choose an open-source license deliberately
 before encouraging external redistribution.
+
+## Benchmark 0.1 — measurement contract
+
+The [benchmark schema and methodology](benchmark/README.md) and `goai-bench`
+validator establish reproducible run logging. This is **not** an agent runner,
+and no results, efficiency gains, or external benchmark tasks are claimed.
+
+```sh
+go test ./...
+go run ./cmd/goai-bench -file /path/to/real-runs.jsonl
+```
