@@ -201,3 +201,11 @@ executor. The public transaction manager still cannot authorize commits.
 PID limits. It cannot yet launch or attach untrusted processes: attaching a
 running `bwrap` by PID is racy and expressly forbidden until a trusted pre-exec
 placement mechanism is implemented. See [stage 4 design](docs/sandbox-stage-4.md).
+
+### Cgroup launcher (experimental, PR #10)
+
+`cmd/goai-cgroup-exec` performs fail-closed Linux cgroup v2 self-migration
+**before** executing a trusted target and verifies kernel membership.
+See [`docs/sandbox-stage-5.md`](docs/sandbox-stage-5.md) for the opt-in bounded
+`pids.max` test and outstanding security work. It is not connected to the
+agent validator and does not imply safe execution of untrusted code.
