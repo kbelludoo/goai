@@ -171,3 +171,14 @@ with descendants and normal parent exit with a still-running child. This is
 credential, syscall or resource isolation is implemented. The TxManager
 remains fail-closed without a validated sandbox. See
 [the stage 1 security scope](docs/sandbox-stage-1.md).
+
+### Issue #2 stage 2: controlled host canaries (non-authorizing)
+
+`internal/sandboxcheck` runs a **trusted, static helper** under Bubblewrap with
+separate Linux PID, network and mount namespaces. It verifies both controlled
+host resources (a loopback HTTP server and an ephemeral `/tmp` sentinel) and
+namespace identity, failing closed if `bwrap` cannot start or a canary detects
+host access. The helper never runs agent code, and this preflight is not yet
+part of a production sandbox validator; `TxManager` **still cannot approve**.
+On platforms without `bwrap` this stage cannot be validated end-to-end. See
+[stage 2 threat model and opt-in test](docs/sandbox-stage-2.md).
