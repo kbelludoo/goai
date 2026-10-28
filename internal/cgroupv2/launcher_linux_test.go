@@ -120,3 +120,46 @@ func TestExecvePreservesPIDAsIndependentMechanism(t *testing.T) {
 	}
 }
 func intString(i int) string { return strconv.Itoa(i) }
+
+// Codes are a machine contract shared by every stage of the sandbox chain. Two
+// different failures must never answer to the same code, or an agent cannot
+// tell "your path is not a cgroup" from "your root still holds tasks".
+//
+// This test is deliberately self-contained: it must compile on the launcher
+// branch too, where the delegation-root errors of the cgroupv2 package do not
+// exist yet, so it asserts the *range* instead of importing those variables.
+func TestLauncherCodesAreUniqueAndOutsideTheDelegationRange(t *testing.T) {
+	codes := map[string]string{
+		"ErrLaunchDenied": codeOf(t, ErrLaunchDenied),
+		"ErrJoinFailed":   codeOf(t, ErrJoinFailed),
+	}
+	seen := map[string]string{}
+	for name, code := range codes {
+		if other, ok := seen[code]; ok {
+			t.Fatalf("%s and %s share code %s", name, other, code)
+		}
+		seen[code] = name
+		number := strings.TrimPrefix(code, "GOAI-CGROUP-")
+		if number == code {
+			t.Fatalf("%s has an unexpected code shape: %s", name, code)
+		}
+		value, err := strconv.Atoi(number)
+		if err != nil {
+			t.Fatalf("%s has a non-numeric code: %s", name, code)
+		}
+		// 001-010 belong to cgroup discovery, delegation and placement.
+		if value < 20 {
+			t.Fatalf("%s=%s reuses the delegation range", name, code)
+		}
+	}
+}
+
+func codeOf(t *testing.T, err error) string {
+	t.Helper()
+	text := err.Error()
+	if i := strings.Index(text, ":"); i > 0 {
+		return text[:i]
+	}
+	t.Fatalf("error has no code prefix: %v", err)
+	return ""
+}

@@ -12,9 +12,12 @@ import (
 	"syscall"
 )
 
+// Launcher error codes live in their own block: GOAI-CGROUP-004 and -005 are
+// already taken by the delegation-root errors in root_linux.go, and machine
+// consumers branch on codes rather than on variable names.
 var (
-	ErrLaunchDenied = errors.New("GOAI-CGROUP-004: unverified cgroup; refusing exec")
-	ErrJoinFailed   = errors.New("GOAI-CGROUP-005: failed to enter prepared cgroup")
+	ErrLaunchDenied = errors.New("GOAI-CGROUP-020: unverified cgroup; refusing exec")
+	ErrJoinFailed   = errors.New("GOAI-CGROUP-021: failed to enter prepared cgroup")
 )
 
 const cgroup2SuperMagic = 0x63677270
