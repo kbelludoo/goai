@@ -96,8 +96,11 @@ func execveatFD(fd int, argv, env []string) error {
 	if err != nil {
 		return errors.Join(ErrLaunchDenied, err)
 	}
+	if sysExecveat < 0 {
+		return fmt.Errorf("%w: execveat has no known syscall number on this architecture", ErrLaunchDenied)
+	}
 	var emptyPath [1]byte // NUL; execveat ignores it under AT_EMPTY_PATH
-	_, _, errno := syscall.RawSyscall6(syscall.SYS_EXECVEAT,
+	_, _, errno := syscall.RawSyscall6(uintptr(sysExecveat),
 		uintptr(fd),
 		uintptr(unsafe.Pointer(&emptyPath[0])),
 		uintptr(unsafe.Pointer(&argvp[0])),
