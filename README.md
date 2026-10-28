@@ -159,3 +159,15 @@ The transaction manager's single-file write path now uses
 rename on a matching revision. This **does not** create kernel-level CAS,
 securely isolate paths, stop non-cooperating IDE/Git writes, or make the sandbox
 available. See [writer limitations](docs/atomicwriter-0.2.md).
+
+
+### Issue #2 stage 1: trusted-process supervisor (not a sandbox)
+
+`internal/supervisor` provides a Linux-only best-effort process-group
+termination helper for **trusted internal commands**, with cancellation and
+bounded in-memory diagnostics. Integration tests cover canceling a process
+with descendants and normal parent exit with a still-running child. This is
+**not** permitted to execute AI-generated code: no network, filesystem,
+credential, syscall or resource isolation is implemented. The TxManager
+remains fail-closed without a validated sandbox. See
+[the stage 1 security scope](docs/sandbox-stage-1.md).
