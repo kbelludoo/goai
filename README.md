@@ -100,9 +100,53 @@ establish the agent's reliability.
 
 The module path is `github.com/kbelludoo/goai`. A GitHub Actions workflow
 runs `go test ./...`, `go vet ./...` and the end-to-end demonstration on pushes
-and pull requests. **The workflow has not been verified on GitHub yet.**
+and pull requests. The initial CI run passed on GitHub; future PR runs must still be checked.
 
 ## License
 
 No license has been selected yet. Choose an open-source license deliberately
 before encouraging external redistribution.
+
+
+## GoAI 0.2 protocol draft (experimental)
+
+See [the 0.2 architecture RFC](docs/architecture-0.2.md) for a proposed
+transaction lifecycle and recognition protocol. The new `internal/agentproto`
+and `internal/recon` packages implement **data contracts, guard checks and
+read-only candidate discovery**. They are not wired into the GoAI CLI.
+
+The draft does **not** provide a secure test sandbox, trusted validation
+attestations, durable transaction commits, or improved success/token benchmarks.
+Track implementation in [transactions](https://github.com/kbelludoo/goai/issues/1),
+[sandbox](https://github.com/kbelludoo/goai/issues/2), and
+[recognition](https://github.com/kbelludoo/goai/issues/3).
+
+### Candidate-integrity hardening (draft PR)
+
+The 0.2 draft now supports a **sealed in-process candidate catalogue** and
+compact agent-facing summaries. `recon.Discover` returns a local registry;
+serialize `registry.Response()` to an agent, then accept only its candidate
+**ID** and resolve it back against that original registry. The digest binds
+the transaction, source revision, entire patch and expected output revision.
+
+`ValidationReport` structurally binds the intended candidate and checks the
+required gate names, but **reports are not authentic evidence**. No validator,
+sandbox, durable authoritative state or safe commit protocol has been added.
+Do not use any exported `Transaction.State` value as authorization for changes
+written by an untrusted client. The 0.1 CLI still provides its original
+manual `-write` behavior, which has *not* gained sandbox validation.
+
+## Private transaction manager (0.2 draft)
+
+`internal/txmanager` now contains an **in-process fail-closed state-machine
+prototype** with CSPRNG opaque capabilities, a sealed candidate catalogue,
+whole-file locks, version checks, one-time commit capabilities and process-local
+hash-chained audit events. Candidate discovery and slow validation now run
+outside the global mutex, while whole-file reservations remain active until
+commit or rejection (see concurrency tests and [the transaction RFC](docs/txmanager-0.2.md)).
+The public `NewManager` intentionally has **no
+privileged validator**, so it **cannot approve or commit** user code. Tests
+exercise the positive path only with a synthetic *in-package* validator.
+The project has **no secure sandbox** or durable transaction manager yet.
+See [transaction manager design](docs/txmanager-0.2.md) for guarantees and
+limitations.
