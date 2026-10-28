@@ -145,7 +145,8 @@ credentials or syscalls. Limits bound damage; they are not a security boundary.
 | `TestStartRefusesPreconfiguredPlacement` | caller-provided `UseCgroupFD` is rejected, never silently overridden |
 | `TestRandomNameIsUniqueAndOpaque` | child names are unguessable, so a pre-created directory cannot be targeted |
 | `policy_test.go` | tri-state gate: unknown denies, empty/unlimited profiles deny, untrusted roots deny |
-| `TestRealAtomicPlacementAndLimits` (opt-in) | **kernel behaviour**: `clone3` placement, `memory.max`/`cpu.max`/`pids.max` values, `cgroup.kill` drain |
+| `TestRealAtomicPlacementAndLimits` (opt-in) | **kernel behaviour**: `clone3` placement, limit values, `cgroup.kill` drain |
+| `TestRealMemoryAndCPUContainment` (opt-in) | **enforcement, not configuration**: `memory.events:oom_kill` increments under a 128 MiB cap, and `cpu.stat:nr_throttled` increments under a 50% quota |
 
 The opt-in test never runs silently in CI:
 
@@ -160,11 +161,49 @@ stage was written on it **skipped**, because creating a cgroup requires
 privileges the sandbox does not have; the synthetic tests are the only ones that
 ran here and they are not kernel tests.
 
+## Evidence status per controller
+
+Setting a limit and reading it back proves configuration, not enforcement. The
+distinction matters because the project's whole claim is about evidence:
+
+| controller | observed enforcement | where |
+| --- | --- | --- |
+| `pids` | kernel denies forks, `pids.events:max` increments | self-migration launcher probe |
+| `memory` | kernel OOM-kills the payload, `memory.events:oom_kill` increments | opt-in test in this branch |
+| `cpu` | kernel throttles a busy loop, `cpu.stat:nr_throttled` increments | opt-in test in this branch |
+
+None of the three has been observed on a delegated host yet; all three skip
+without `GOAI_TEST_CGROUP_ROOT`.
+
+## Reconciliation needed with the self-migration launcher proposal
+
+Two independent stage-5 proposals exist (this one and the
+`goai-cgroup-exec` self-migration launcher). They are complementary but must be
+merged by one owner, not concatenated:
+
+- **Duplicate identifiers**: both define `internal/cgroupv2` error variables
+  carrying `GOAI-CGROUP-004` and `-005` with different meanings
+  (`ErrNotADirectory`/`ErrBusyRoot` here, `ErrLaunchDenied`/`ErrJoinFailed`
+  there). Machine consumers branch on codes, so one set must be renumbered.
+- **Duplicate path**: both add `docs/sandbox-stage-5.md`.
+- **Two placement mechanisms**: `clone3(CLONE_INTO_CGROUP)` places a fresh child
+  before exec without trusting the launcher, and also covers children the
+  launcher spawns later; self-migration (`write own PID`, then `exec`) needs no
+  kernel 5.7+ but requires a trusted launcher and cannot place a process whose
+  credentials differ from the launcher's. Keep `clone3` as the primitive and
+  self-migration, if kept at all, as a documented fallback — not as a second
+  unaudited path.
+- **One authorization story**: neither proposal authenticates the caller. Any
+  local process that can create a finite-limit child cgroup can currently ask
+  the launcher to exec an arbitrary binary; the launcher must require an
+  unforgeable capability (supervisor socket with peer check, or a UID that the
+  confined workload cannot hold) rather than infer authority from path shape.
+
 ## Remaining Issue #2 work
 
-1. Real delegated Linux host run of `TestRealAtomicPlacementAndLimits`.
-2. Adversarial resource tests: fork bomb (`pids.max`), memory exhaustion
-   (`memory.max` + OOM behaviour), CPU throttling measurement.
+1. Real delegated Linux host run of the three opt-in tests.
+2. A pids pressure test on the same host as the memory/CPU tests, so all three
+   controllers are observed by the same harness.
 3. Bubblewrap integration that passes `Handle.Start` attrs (namespaces,
    `--uid`/`--gid` to a different UID, which is what actually prevents the escape
    above), plus verifying `bwrap` did not silently weaken flags.

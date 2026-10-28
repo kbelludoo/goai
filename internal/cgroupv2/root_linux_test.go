@@ -4,9 +4,11 @@ package cgroupv2
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -275,10 +277,136 @@ func TestRealAtomicPlacementAndLimits(t *testing.T) {
 	_ = cmd.Wait()
 }
 
-// TestCgroupChildProcess is the confined payload for the opt-in test above.
+// TestCgroupChildProcess is the confined payload for the opt-in tests above and
+// below. It never runs unless a parent test asked for a specific mode.
 func TestCgroupChildProcess(t *testing.T) {
-	if os.Getenv("GOAI_CGROUP_CHILD") != "1" {
-		t.Skip("helper process for TestRealAtomicPlacementAndLimits")
+	mode := os.Getenv("GOAI_CGROUP_CHILD")
+	if mode == "" {
+		t.Skip("helper process for the opt-in cgroup tests")
 	}
-	time.Sleep(30 * time.Second)
+	// Brief delay so the parent can verify placement before pressure starts.
+	time.Sleep(300 * time.Millisecond)
+	switch mode {
+	case "memory":
+		// Touch every page: RSS grows until memory.max kills this process.
+		buf := make([]byte, 512<<20)
+		for i := 0; i < len(buf); i += 4096 {
+			buf[i] = 1
+		}
+		// Reached only if the kernel did NOT enforce memory.max; the parent
+		// bounds its wait and fails with that exact message.
+		time.Sleep(30 * time.Second)
+	case "cpu":
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		x := 1
+		for time.Now().Before(deadline) {
+			x = x*3 + 1
+		}
+		_ = x
+	default:
+		time.Sleep(30 * time.Second)
+	}
+}
+
+// counter reads a single "key value" line from a cgroup v2 stats file.
+func counter(t *testing.T, path, key string) uint64 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == key {
+			value, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				t.Fatalf("%s %s: %v", path, key, err)
+			}
+			return value
+		}
+	}
+	t.Fatalf("%s has no %q counter", path, key)
+	return 0
+}
+
+// startChild places one bounded payload in the cgroup through clone3 and waits
+// for it, so a missing kill cannot hang the suite.
+func startChild(t *testing.T, h *Handle, mode string, wait time.Duration) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestCgroupChildProcess")
+	cmd.Env = append(os.Environ(), "GOAI_CGROUP_CHILD="+mode)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := h.Start(cmd, nil); err != nil {
+		t.Fatalf("%s payload was not placed atomically: %v", mode, err)
+	}
+	return waitBounded(t, cmd, wait)
+}
+
+func waitBounded(t *testing.T, cmd *exec.Cmd, wait time.Duration) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(wait):
+		_ = cmd.Process.Kill()
+		<-done
+		return fmt.Errorf("payload still running after %s: the kernel did not stop it", wait)
+	}
+}
+
+// TestRealMemoryAndCPUContainment is the opt-in complement to
+// TestRealAtomicPlacementAndLimits: placement and pids are covered there (and by
+// the launcher probe), so this test proves the two limits that "configured" and
+// "enforced" could otherwise be confused for each other.
+//
+//	GOAI_TEST_CGROUP_ROOT=/sys/fs/cgroup/<delegated> go test ./internal/cgroupv2 -run Real -v
+func TestRealMemoryAndCPUContainment(t *testing.T) {
+	rootPath := os.Getenv("GOAI_TEST_CGROUP_ROOT")
+	if rootPath == "" {
+		t.Skip("set GOAI_TEST_CGROUP_ROOT to a delegated, process-free cgroup v2 directory")
+	}
+	root, err := At(rootPath)
+	if err != nil {
+		t.Fatalf("delegation root rejected: %v", err)
+	}
+	if err := root.EnableControllers(); err != nil {
+		t.Fatalf("EnableControllers: %v", err)
+	}
+	// 128 MiB is above the Go runtime's baseline and far below the payload's
+	// 512 MiB touch loop, so an OOM kill is the only possible outcome.
+	limits := Limits{MemoryMaxBytes: 128 << 20, CPUQuotaUS: 50000, CPUPeriodUS: 100000, PIDsMax: 16}
+	h, err := root.Prepare(limits)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer func() {
+		_ = h.Kill()
+		_ = h.WaitEmpty(5 * time.Second)
+		if err := h.Destroy(); err != nil {
+			t.Errorf("Destroy after empty: %v", err)
+		}
+	}()
+
+	oomBefore := counter(t, filepath.Join(h.Path(), "memory.events"), "oom_kill")
+	if err := startChild(t, h, "memory", 25*time.Second); err == nil {
+		t.Fatal("memory payload exited successfully under a 128 MiB cap; memory.max was not enforced")
+	}
+	oomAfter := counter(t, filepath.Join(h.Path(), "memory.events"), "oom_kill")
+	if oomAfter <= oomBefore {
+		t.Fatalf("memory.events oom_kill stayed %d: the kernel did not attribute an OOM kill to this cgroup", oomBefore)
+	}
+	if pids, err := h.Procs(); err != nil || len(pids) != 0 {
+		t.Fatalf("cgroup not empty after OOM kill: %v %v", pids, err)
+	}
+
+	throttledBefore := counter(t, filepath.Join(h.Path(), "cpu.stat"), "nr_throttled")
+	if err := startChild(t, h, "cpu", 20*time.Second); err != nil {
+		t.Fatalf("cpu payload did not finish cleanly: %v", err)
+	}
+	throttledAfter := counter(t, filepath.Join(h.Path(), "cpu.stat"), "nr_throttled")
+	if throttledAfter <= throttledBefore {
+		t.Fatalf("cpu.stat nr_throttled stayed %d under a 50%% quota with a busy loop: cpu.max was not enforced", throttledBefore)
+	}
 }
