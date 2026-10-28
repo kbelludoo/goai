@@ -4,6 +4,7 @@
 //	goai patch   -file f.go -patch p.json [-write]
 //	goai context -file f.go [-brief] [-typecheck]
 //	goai check   -file f.go
+//	goai sandbox [-root cgroup2-dir] [-limits profile] [-probe trusted-binary]
 //
 // The mode is the first positional argument; omitting it keeps the original
 // `goai -file f.go -patch p.json` invocation working.
@@ -18,9 +19,10 @@ import (
 	"strings"
 
 	"github.com/kbelludoo/goai/internal/engine"
+	"github.com/kbelludoo/goai/internal/sandboxpolicy"
 )
 
-const usageLine = "usage: goai [patch|context|check] -file file.go [-patch patch.json] [-write] [-brief] [-typecheck]"
+const usageLine = "usage: goai [patch|context|check] -file file.go [-patch patch.json] [-write] [-brief] [-typecheck] | goai sandbox [-root dir] [-probe binary]"
 
 // options is the parsed command line. It exists as a value so that mode and
 // flag interaction is testable without exec'ing the binary.
@@ -31,6 +33,10 @@ type options struct {
 	write     bool
 	brief     bool
 	typecheck bool
+	root      string
+	probe     string
+	limits    string
+	enable    bool
 }
 
 // usageErr carries a stable diagnostic code to the JSON envelope.
@@ -56,6 +62,10 @@ func parseArgs(args []string) (options, error) {
 	write := fs.Bool("write", false, "write the validated candidate to source")
 	brief := fs.Bool("brief", false, "context: omit doc comments and signatures")
 	typecheck := fs.Bool("typecheck", false, "context: also run the type-checker")
+	rootFlag := fs.String("root", "", "sandbox: delegated, process-free cgroup v2 directory")
+	probeFlag := fs.String("probe", "", "sandbox: trusted absolute binary used to prove atomic placement")
+	limitsFlag := fs.String("limits", "", "sandbox: policy profile, e.g. 512MiB/50%/100")
+	enableFlag := fs.Bool("enable", false, "sandbox: enable cpu/memory/pids controllers on a process-free root (mutates host)")
 
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		opts.mode = args[0]
@@ -71,10 +81,18 @@ func parseArgs(args []string) (options, error) {
 		return opts, &usageErr{code: "GOAI-USAGE-002", message: "unexpected arguments: " + strings.Join(fs.Args(), " ")}
 	}
 	opts.file, opts.patch, opts.write, opts.brief, opts.typecheck = *file, *patch, *write, *brief, *typecheck
+	opts.root, opts.probe, opts.limits = *rootFlag, *probeFlag, *limitsFlag
+	opts.enable = *enableFlag
 	switch opts.mode {
 	case "patch", "context", "check":
+	case "sandbox":
+		// sandbox mode reads no file, so -file is not required.
+		if opts.file != "" {
+			return opts, &usageErr{code: "GOAI-USAGE-002", message: "sandbox mode does not take -file"}
+		}
+		return opts, nil
 	default:
-		return opts, &usageErr{code: "GOAI-USAGE-003", message: "unknown mode " + opts.mode + ": expected patch, context, or check"}
+		return opts, &usageErr{code: "GOAI-USAGE-003", message: "unknown mode " + opts.mode + ": expected patch, context, check, or sandbox"}
 	}
 	if opts.file == "" {
 		return opts, &usageErr{code: "GOAI-USAGE-001", message: usageLine}
@@ -94,6 +112,10 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0) // flag.ErrHelp already printed usage
+	}
+	if opts.mode == "sandbox" {
+		runSandbox(opts)
+		return
 	}
 	source, err := os.ReadFile(opts.file)
 	if err != nil {
@@ -167,6 +189,68 @@ func runPatch(opts options, original []byte) {
 		out.NextActions = engine.WithoutKind(out.NextActions, "apply_write")
 	}
 	emit(out)
+}
+
+// runSandbox prints a fail-closed verdict. A denied decision exits 2 so a
+// caller script cannot mistake "cannot prove containment" for success.
+func runSandbox(opts options) {
+	root := opts.root
+	if root == "" {
+		root = os.Getenv("GOAI_DELEGATION_ROOT")
+	}
+	limits, err := sandboxpolicy.ParseLimits(opts.limits)
+	if err != nil {
+		emit(sandboxpolicy.Decision{
+			Protocol: sandboxpolicy.Protocol,
+			Mode:     "sandbox",
+			Allowed:  false,
+			Checks: []sandboxpolicy.Check{{
+				Name:   "limits",
+				Status: sandboxpolicy.StatusFail,
+				Code:   "GOAI-CGROUP-003",
+				Detail: err.Error(),
+			}},
+			Reasons: []string{err.Error()},
+		})
+		os.Exit(1)
+	}
+	if opts.enable {
+		// Explicit host mutation: enabling controllers is how a delegated but
+		// not-yet-enabled root becomes usable. Report it as its own check so a
+		// denial cannot hide which step failed.
+		if err := sandboxpolicy.Enable(root); err != nil {
+			emit(sandboxpolicy.Decision{
+				Protocol: sandboxpolicy.Protocol,
+				Mode:     "sandbox",
+				Root:     root,
+				Allowed:  false,
+				Checks: []sandboxpolicy.Check{{
+					Name:   "enable_controllers",
+					Status: sandboxpolicy.StatusFail,
+					Code:   "GOAI-CGROUP-002",
+					Detail: err.Error(),
+				}},
+				Reasons: []string{err.Error()},
+			})
+			os.Exit(2)
+		}
+	}
+	if opts.probe == "" {
+		decision := sandboxpolicy.Evaluate(root, limits)
+		emit(decision)
+		if !decision.Allowed {
+			os.Exit(2)
+		}
+		return
+	}
+	decision, probeErr := sandboxpolicy.ProbeAtomicPlacement(root, limits, opts.probe)
+	emit(decision)
+	if probeErr != nil || !decision.Allowed {
+		if probeErr != nil {
+			fmt.Fprintln(os.Stderr, "probe:", probeErr)
+		}
+		os.Exit(2)
+	}
 }
 
 func emit(v any) {

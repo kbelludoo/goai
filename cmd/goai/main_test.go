@@ -54,3 +54,33 @@ func TestParseArgsHelp(t *testing.T) {
 		t.Fatalf("expected help to be reported as ErrHelp, got %v", err)
 	}
 }
+
+func TestParseArgsSandboxMode(t *testing.T) {
+	opts, err := parseArgs([]string{"sandbox", "-root", "/sys/fs/cgroup/x", "-limits", "512MiB/50%/100", "-enable"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.mode != "sandbox" || opts.root != "/sys/fs/cgroup/x" || !opts.enable ||
+		opts.limits != "512MiB/50%/100" {
+		t.Fatalf("sandbox flags not parsed: %+v", opts)
+	}
+	if opts.file != "" {
+		t.Fatalf("sandbox must not require -file: %+v", opts)
+	}
+}
+
+func TestParseArgsSandboxRejectsFile(t *testing.T) {
+	_, err := parseArgs([]string{"sandbox", "-file", "wallet.go"})
+	var usage *usageErr
+	if !errors.As(err, &usage) || usage.code != "GOAI-USAGE-002" {
+		t.Fatalf("expected usage error for -file in sandbox mode, got %v", err)
+	}
+}
+
+func TestParseArgsUnknownMode(t *testing.T) {
+	_, err := parseArgs([]string{"sandboxd", "-root", "/x"})
+	var usage *usageErr
+	if !errors.As(err, &usage) || usage.code != "GOAI-USAGE-003" {
+		t.Fatalf("expected unknown mode error, got %v", err)
+	}
+}

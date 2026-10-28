@@ -154,9 +154,128 @@ establish the agent's reliability. See
 
 The module path is `github.com/kbelludoo/goai`. A GitHub Actions workflow
 runs `go test ./...`, `go vet ./...` and the end-to-end demonstration on pushes
-and pull requests; the 0.2 protocol commit is green on GitHub Actions.
+and pull requests. CI includes `go test`, `go test -race`, `go vet` and the
+end-to-end demo; runs are green on GitHub Actions (check each PR individually).
 
 ## License
 
 No license has been selected yet. Choose an open-source license deliberately
 before encouraging external redistribution.
+
+
+## GoAI 0.2 protocol draft (experimental)
+
+See [the 0.2 architecture RFC](docs/architecture-0.2.md) for a proposed
+transaction lifecycle and recognition protocol. The new `internal/agentproto`
+and `internal/recon` packages implement **data contracts, guard checks and
+read-only candidate discovery**. They are not wired into the GoAI CLI.
+
+The draft does **not** provide a secure test sandbox, trusted validation
+attestations, durable transaction commits, or improved success/token benchmarks.
+Track implementation in [transactions](https://github.com/kbelludoo/goai/issues/1),
+[sandbox](https://github.com/kbelludoo/goai/issues/2), and
+[recognition](https://github.com/kbelludoo/goai/issues/3).
+
+### Candidate-integrity hardening (draft PR)
+
+The 0.2 draft now supports a **sealed in-process candidate catalogue** and
+compact agent-facing summaries. `recon.Discover` returns a local registry;
+serialize `registry.Response()` to an agent, then accept only its candidate
+**ID** and resolve it back against that original registry. The digest binds
+the transaction, source revision, entire patch and expected output revision.
+
+`ValidationReport` structurally binds the intended candidate and checks the
+required gate names, but **reports are not authentic evidence**. No validator,
+sandbox, durable authoritative state or safe commit protocol has been added.
+Do not use any exported `Transaction.State` value as authorization for changes
+written by an untrusted client. The 0.1 CLI still provides its original
+manual `-write` behavior, which has *not* gained sandbox validation.
+
+## Private transaction manager (0.2 draft)
+
+`internal/txmanager` now contains an **in-process fail-closed state-machine
+prototype** with CSPRNG opaque capabilities, a sealed candidate catalogue,
+whole-file locks, version checks, one-time commit capabilities and process-local
+hash-chained audit events. Candidate discovery and slow validation now run
+outside the global mutex, while whole-file reservations remain active until
+commit or rejection (see concurrency tests and [the transaction RFC](docs/txmanager-0.2.md)).
+The public `NewManager` intentionally has **no
+privileged validator**, so it **cannot approve or commit** user code. Tests
+exercise the positive path only with a synthetic *in-package* validator.
+The project has **no secure sandbox** or durable transaction manager yet.
+See [transaction manager design](docs/txmanager-0.2.md) for guarantees and
+limitations.
+
+### Revision-checked cooperative commit (Linux, design increment)
+
+The transaction manager's single-file write path now uses
+`internal/atomicwriter` to stage a replacement, acquire a persistent Linux
+`flock` sidecar, check original content and inode identity, and atomically
+rename on a matching revision. This **does not** create kernel-level CAS,
+securely isolate paths, stop non-cooperating IDE/Git writes, or make the sandbox
+available. See [writer limitations](docs/atomicwriter-0.2.md).
+
+
+### Issue #2 stage 1: trusted-process supervisor (not a sandbox)
+
+`internal/supervisor` provides a Linux-only best-effort process-group
+termination helper for **trusted internal commands**, with cancellation and
+bounded in-memory diagnostics. Integration tests cover canceling a process
+with descendants and normal parent exit with a still-running child. This is
+**not** permitted to execute AI-generated code: no network, filesystem,
+credential, syscall or resource isolation is implemented. The TxManager
+remains fail-closed without a validated sandbox. See
+[the stage 1 security scope](docs/sandbox-stage-1.md).
+
+### Issue #2 stage 2: controlled host canaries (non-authorizing)
+
+`internal/sandboxcheck` runs a **trusted, static helper** under Bubblewrap with
+separate Linux PID, network and mount namespaces. It verifies both controlled
+host resources (a loopback HTTP server and an ephemeral `/tmp` sentinel) and
+namespace identity, failing closed if `bwrap` cannot start or a canary detects
+host access. The helper never runs agent code, and this preflight is not yet
+part of a production sandbox validator; `TxManager` **still cannot approve**.
+On platforms without `bwrap` this stage cannot be validated end-to-end. See
+[stage 2 threat model and opt-in test](docs/sandbox-stage-2.md).
+
+
+## GoAI sandbox stage 3: detached-process canary
+
+`internal/sandboxcheck` additionally tests the cleanup of a trusted `setsid`
+process inside a Bubblewrap PID namespace. It uses a host-visible, nonce-bound
+`/proc` scanner with a *positive live-daemon control* before termination.
+See [the stage-3 design](docs/sandbox-stage-3.md). The real isolation test is
+opt-in; neither these canaries nor `CGO_ENABLED=0` prove a safe untrusted
+executor. The public transaction manager still cannot authorize commits.
+
+## Issue #2 stage 4: fail-closed cgroup v2 discovery (not an executor)
+
+`internal/cgroupv2` locates the running process's cgroup v2 membership using
+`/proc/self/cgroup` and `/proc/self/mountinfo`, verifies resource-controller
+**delegation**, and can prepare an empty child with verified CPU, memory and
+PID limits. It cannot yet launch or attach untrusted processes: attaching a
+running `bwrap` by PID is racy and expressly forbidden until a trusted pre-exec
+placement mechanism is implemented. See [stage 4 design](docs/sandbox-stage-4.md).
+
+## Issue #2 stage 5: atomic pre-exec placement and a host policy gate
+
+`internal/cgroupv2` now takes an **explicit delegation root** (never the current
+cgroup, which is usually an undelegable `init.scope`), enables the three required
+controllers only on a process-free root, and launches children with
+`clone3(CLONE_INTO_CGROUP)` — placement happens in the kernel *before* exec, so
+there is no fork-then-move window. Membership is verified, termination uses
+`cgroup.kill`, and every refusal is a named error.
+
+`internal/sandboxpolicy` is the fail-closed gate:
+
+```sh
+go run ./cmd/goai sandbox -limits default            # read-only verdict, exit 2 when denied
+go run ./cmd/goai sandbox -root <delegated> -enable  # explicit host mutation
+go run ./cmd/goai sandbox -root <delegated> -limits 512MiB/50%/100 -probe /usr/bin/true
+```
+
+An `unknown` check denies: "not verified" must never serialize as allowed. A
+process that may write the delegation root can still move itself out of the
+budget, so prevention requires UID separation in the sandbox; `VerifyContains`
+detects it, and this is why `TxManager` still has no validator. See
+[stage 5 design](docs/sandbox-stage-5.md).
