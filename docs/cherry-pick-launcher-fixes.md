@@ -1,11 +1,16 @@
 # Launcher fixes: what each commit changes and how to verify it
 
-Six commits on this branch are deltas against
-`feature/goai-cgroup-self-migration-stage5` (PR #10). Cherry-pick them in order;
-each one leaves the tree buildable and adds its own regression tests.
+Eleven commits on this branch are deltas against
+`feature/goai-cgroup-self-migration-stage5` (PR #10). Only the launcher files are
+touched, so they do not depend on the `clone3`/policy work in this branch.
+
+Verified by dry run on a detached worktree at `origin/pr10`: all eleven apply
+without conflicts, and no cherry-picked file references a symbol that exists
+only here. The import commit at the start of this branch's history is a **no-op**
+on PR #10 (the files are already there), so skip it:
 
 ```sh
-git log --oneline --reverse origin/pr10..origin/arena/5c4bdb6c-goai
+git log --oneline --reverse 6086dbe..HEAD -- internal/cgroupv2 cmd/goai-cgroup-exec
 ```
 
 | # | Commit subject | Priority | File(s) | Regression test |
@@ -17,6 +22,10 @@ git log --oneline --reverse origin/pr10..origin/arena/5c4bdb6c-goai
 | 4 | exec the validated inode (`execveat`) | P1 | `launcher_linux.go`, `exec_linux.go` | `exec_linux_test.go` |
 | 5 | accept a target with no extra argv | P2 | `cmd/goai-cgroup-exec` | `cmd/goai-cgroup-exec/main_linux_test.go` |
 | 6 | supervisor-authorized ticket | blocking | `authority_linux.go`, launcher, CLI | `authority_linux_test.go`, CLI tests |
+| 7 | execveat syscall numbers per architecture | follow-up to 4 | `sysnum_*_linux.go` | (compile-time) |
+| 8 | test arity fix | follow-up to 6 | CLI test | existing |
+| 9 | four defects the suite exposed | follow-up | launcher, tests | existing |
+| 10 | scrub only in child processes | follow-up to 3 | `launcher_fds_linux_test.go` | `TestScrubClosesDescriptorsAboveStderr` |
 
 ## Why commit 2 is more than an emptiness check
 
