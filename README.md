@@ -141,7 +141,10 @@ manual `-write` behavior, which has *not* gained sandbox validation.
 `internal/txmanager` now contains an **in-process fail-closed state-machine
 prototype** with CSPRNG opaque capabilities, a sealed candidate catalogue,
 whole-file locks, version checks, one-time commit capabilities and process-local
-hash-chained audit events. The public `NewManager` intentionally has **no
+hash-chained audit events. Candidate discovery and slow validation now run
+outside the global mutex, while whole-file reservations remain active until
+commit or rejection (see concurrency tests and [the transaction RFC](docs/txmanager-0.2.md)).
+The public `NewManager` intentionally has **no
 privileged validator**, so it **cannot approve or commit** user code. Tests
 exercise the positive path only with a synthetic *in-package* validator.
 The project has **no secure sandbox** or durable transaction manager yet.

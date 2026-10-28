@@ -35,8 +35,10 @@ var (
 type State string
 
 const (
+	Preparing      State = "preparing" // private discovery reservation, not agent-visible
 	Reconnaissance State = "reconnaissance"
 	Chosen         State = "chosen"
+	Validating     State = "validating"
 	Approved       State = "approved"
 	Rejected       State = "rejected"
 	Committed      State = "committed"
@@ -85,15 +87,16 @@ type trustedValidator interface {
 }
 
 type record struct {
-	state           State
-	file            string
-	sourceSHA256    string
-	catalog         *agentproto.CandidateCatalog
-	transaction     agentproto.Transaction
-	reconToken      string
-	commitToken     string
-	expiresAt       time.Time
-	candidateSource []byte
+	state            State
+	file             string
+	sourceSHA256     string
+	catalog          *agentproto.CandidateCatalog
+	transaction      agentproto.Transaction
+	reconToken       string
+	commitToken      string
+	expiresAt        time.Time
+	candidateSource  []byte
+	cancelValidation context.CancelFunc
 }
 
 type Manager struct {
@@ -148,7 +151,12 @@ func (m *Manager) AuditSnapshot() []AuditEvent {
 	defer m.mu.Unlock()
 	return append([]AuditEvent(nil), m.audit...)
 }
-func (m *Manager) releaseLocked(id string, r *record) { delete(m.fileLocks, r.file) }
+func (m *Manager) releaseLocked(id string, r *record) {
+	// Do not delete a newer transaction's lock if the map was ever reused.
+	if m.fileLocks[r.file] == id {
+		delete(m.fileLocks, r.file)
+	}
+}
 func (m *Manager) rejectLocked(id string, r *record, reason string) {
 	r.state = Rejected
 	r.commitToken = ""
@@ -161,6 +169,19 @@ func (m *Manager) getLocked(id string) (*record, error) {
 		return nil, ErrUnknown
 	}
 	if r.state != Rejected && r.state != Committed && !m.now().Before(r.expiresAt) {
+		// Never free a scope while its validator may still be running.
+		// A context cancellation is requested, but only the validator return
+		// (and finalizer) may release ownership of the file.
+		if r.state == Preparing {
+			// Discovery still owns the file. Its finalizer will release it.
+			return nil, ErrExpired
+		}
+		if r.state == Validating {
+			if r.cancelValidation != nil {
+				r.cancelValidation()
+			}
+			return nil, ErrExpired
+		}
 		m.rejectLocked(id, r, "expired")
 		return nil, ErrExpired
 	}
@@ -177,61 +198,107 @@ func (m *Manager) verifyRevision(r *record) ([]byte, error) {
 	return source, nil
 }
 
-// Begin generates and seals candidate records before publishing only summaries
-// and a randomly generated reconnaissance capability to an agent. A file-wide
-// lock is deliberately conservative: this is not yet a symbol-scoped lock.
+// Begin reserves the file and transaction under the global lock, then performs
+// potentially expensive AST discovery/type-checking *outside* that lock.
+// Reservations are fail-closed even on timeout: an in-flight discovery retains
+// its file reservation until the operation actually finishes. This prevents
+// another transaction from acting on the same source while discovery is active.
 func (m *Manager) Begin(req agentproto.RecognitionRequest) (Menu, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if req.TransactionID == "" {
 		return Menu{}, errors.New("empty transaction ID")
-	}
-	// A previous owner may have expired without making another API call.
-	// Retire all expired live transactions before checking the file lock.
-	for previousID, old := range m.transactions {
-		if old.state != Rejected && old.state != Committed && !m.now().Before(old.expiresAt) {
-			m.rejectLocked(previousID, old, "expired")
-		}
-	}
-	if _, exists := m.transactions[req.TransactionID]; exists {
-		return Menu{}, errors.New("transaction ID already exists")
 	}
 	path, err := filepath.Abs(req.Selector.File)
 	if err != nil {
 		return Menu{}, err
 	}
 	path = filepath.Clean(path)
-	// Require the caller to supply a canonical absolute path; no base-name matching.
 	if req.Selector.File != path {
 		return Menu{}, errors.New("selector file must be an absolute clean path")
 	}
+
+	// Phase 1: reserve a private record and file lock under a short mutex.
+	// Expiry sweeping currently scans the in-memory map (O(n) records).
+	m.mu.Lock()
+	for previousID, old := range m.transactions {
+		if old.state == Rejected || old.state == Committed || m.now().Before(old.expiresAt) {
+			continue
+		}
+		if old.state == Preparing {
+			continue // discovery owns its scope until it actually stops
+		}
+		if old.state == Validating {
+			if old.cancelValidation != nil {
+				old.cancelValidation()
+			}
+			continue
+		}
+		m.rejectLocked(previousID, old, "expired")
+	}
+	if _, exists := m.transactions[req.TransactionID]; exists {
+		m.mu.Unlock()
+		return Menu{}, errors.New("transaction ID already exists")
+	}
 	if _, locked := m.fileLocks[path]; locked {
+		m.mu.Unlock()
 		return Menu{}, ErrLocked
 	}
+	r := &record{state: Preparing, file: path, expiresAt: m.now().Add(m.ttl)}
+	m.transactions[req.TransactionID] = r
+	m.fileLocks[path] = req.TransactionID
+	m.mu.Unlock()
+
+	// Clean up reservations on failure without exposing an unfinished record.
+	abort := func(reason string, cause error) (Menu, error) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.transactions[req.TransactionID] == r {
+			m.releaseLocked(req.TransactionID, r)
+			delete(m.transactions, req.TransactionID)
+			m.auditLocked(req.TransactionID, "begin_failed:"+reason, "")
+		}
+		return Menu{}, cause
+	}
+
+	// Phase 2: slow filesystem reads, parsing and candidate preflight unlocked.
 	source, err := os.ReadFile(path)
 	if err != nil {
-		return Menu{}, err
+		return abort("read", err)
 	}
 	if engine.SHA(source) != req.Selector.FileSHA256 {
-		return Menu{}, ErrStale
+		return abort("stale", ErrStale)
 	}
 	catalog, err := recon.Discover(path, source, req)
 	if err != nil {
-		return Menu{}, err
+		return abort("discovery", err)
 	}
 	reconToken, err := newToken()
 	if err != nil {
-		return Menu{}, err
+		return abort("token", err)
 	}
 	tx, err := agentproto.NewTransaction(req.TransactionID, req.Selector, req.Intent)
 	if err != nil {
-		return Menu{}, err
+		return abort("transaction", err)
 	}
-	expiry := m.now().Add(m.ttl)
-	m.transactions[req.TransactionID] = &record{state: Reconnaissance, file: path, sourceSHA256: engine.SHA(source), catalog: catalog, transaction: tx, reconToken: reconToken, expiresAt: expiry}
-	m.fileLocks[path] = req.TransactionID
+	if err := verifyFileRevision(path, engine.SHA(source)); err != nil {
+		return abort("source_changed", err)
+	}
+
+	// Phase 3: publish only an immutable sealed candidate catalogue and token.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.now().Before(r.expiresAt) {
+		m.releaseLocked(req.TransactionID, r)
+		delete(m.transactions, req.TransactionID)
+		m.auditLocked(req.TransactionID, "begin_failed:expired", "")
+		return Menu{}, ErrExpired
+	}
+	r.state = Reconnaissance
+	r.sourceSHA256 = engine.SHA(source)
+	r.catalog = catalog
+	r.transaction = tx
+	r.reconToken = reconToken
 	m.auditLocked(req.TransactionID, "reconnaissance", "")
-	return Menu{TransactionID: req.TransactionID, ReconToken: reconToken, ExpiresAt: expiry, Catalog: catalog.Response()}, nil
+	return Menu{TransactionID: req.TransactionID, ReconToken: reconToken, ExpiresAt: r.expiresAt, Catalog: catalog.Response()}, nil
 }
 
 // Choose selects only a trusted registry ID; no client patch is accepted.
@@ -271,53 +338,119 @@ func (m *Manager) Choose(id, reconToken, candidateID string) (Receipt, error) {
 	return Receipt{TransactionID: id, State: r.state, CandidateID: r.transaction.CandidateID, OutputSHA256: r.transaction.CandidateOutputSHA256}, nil
 }
 
-// Validate NEVER consumes an agent-supplied JSON validation report. Until a
-// genuinely isolated, privileged validator is installed it always fails closed.
+// Validate uses a three-phase, fail-closed state transition. The global mutex
+// protects only state mutations, while the trusted validator runs unlocked.
+// File ownership is retained through validation AND the Approved state, until
+// commit/rejection. There is no blocking per-file mutex beneath the global lock.
+// An uncooperative validator must be terminated by a future sandbox backend;
+// expiration or cancellation must never release the file while it still runs.
 func (m *Manager) Validate(ctx context.Context, id, reconToken string) (Receipt, error) {
+	if ctx == nil {
+		return Receipt{}, errors.New("nil validation context")
+	}
+	// Phase 1: reserve the transaction under the short global lock.
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	r, err := m.getLocked(id)
 	if err != nil {
+		m.mu.Unlock()
 		return Receipt{}, err
 	}
 	if r.state != Chosen {
+		m.mu.Unlock()
 		return Receipt{}, ErrState
 	}
 	if !equalToken(r.reconToken, reconToken) {
+		m.mu.Unlock()
 		return Receipt{}, ErrToken
 	}
 	if m.oracle == nil {
+		m.mu.Unlock()
 		return Receipt{}, ErrValidatorUnavailable
 	}
-	if _, err = m.verifyRevision(r); err != nil {
-		m.rejectLocked(id, r, "stale")
+	if err := ctx.Err(); err != nil {
+		m.rejectLocked(id, r, "canceled")
+		m.mu.Unlock()
 		return Receipt{}, err
 	}
-	work := validationWork{transactionID: id, sourceFile: r.file, sourceSHA256: r.sourceSHA256, candidateDigest: r.transaction.CandidateDigest, candidateOutputSHA256: r.transaction.CandidateOutputSHA256, candidateSource: append([]byte(nil), r.candidateSource...)}
-	if err = m.oracle.Validate(ctx, work); err != nil {
+	// The manager's TTL is an upper bound, independent of client input.
+	validationCtx, cancel := context.WithDeadline(ctx, r.expiresAt)
+	r.cancelValidation = cancel
+	r.state = Validating
+	work := validationWork{
+		transactionID:         id,
+		sourceFile:            r.file,
+		sourceSHA256:          r.sourceSHA256,
+		candidateDigest:       r.transaction.CandidateDigest,
+		candidateOutputSHA256: r.transaction.CandidateOutputSHA256,
+		candidateSource:       append([]byte(nil), r.candidateSource...),
+	}
+	m.auditLocked(id, "validating", r.transaction.CandidateDigest)
+	m.mu.Unlock()
+
+	// Phase 2: slow work outside the global lock. The file ownership remains
+	// in m.fileLocks, so another GoAI transaction cannot mutate this file.
+	// External filesystem writers are NOT synchronized by that map.
+	if err = verifyFileRevision(work.sourceFile, work.sourceSHA256); err == nil {
+		err = m.oracle.Validate(validationCtx, work)
+	}
+	var finalFileErr error
+	if err == nil {
+		finalFileErr = verifyFileRevision(work.sourceFile, work.sourceSHA256)
+	}
+	outputIsIntact := engine.SHA(work.candidateSource) == work.candidateOutputSHA256 &&
+		work.candidateDigest == r.transaction.CandidateDigest &&
+		work.candidateOutputSHA256 == r.transaction.CandidateOutputSHA256
+
+	// Phase 3: recheck the exact candidate and source, and finalize under lock.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	defer cancel()
+	r.cancelValidation = nil
+	if r.state != Validating {
+		// Reserved for future explicit administrator interventions. Never
+		// issue authorization if lifecycle ownership has changed.
+		return Receipt{}, ErrState
+	}
+	if err != nil {
 		m.rejectLocked(id, r, "validation")
 		return Receipt{}, err
 	}
-	if err = ctx.Err(); err != nil {
-		m.rejectLocked(id, r, "canceled")
+	if err = validationCtx.Err(); err != nil {
+		m.rejectLocked(id, r, "canceled_or_timeout")
 		return Receipt{}, err
 	}
-	if engine.SHA(work.candidateSource) != work.candidateOutputSHA256 {
+	if !m.now().Before(r.expiresAt) {
+		m.rejectLocked(id, r, "expired")
+		return Receipt{}, ErrExpired
+	}
+	if !outputIsIntact || engine.SHA(r.candidateSource) != r.transaction.CandidateOutputSHA256 {
 		m.rejectLocked(id, r, "output_digest")
 		return Receipt{}, errors.New("candidate output changed during validation")
 	}
-	if _, err = m.verifyRevision(r); err != nil {
+	if finalFileErr != nil {
 		m.rejectLocked(id, r, "stale")
-		return Receipt{}, err
+		return Receipt{}, finalFileErr
 	}
 	token, err := newToken()
 	if err != nil {
+		m.rejectLocked(id, r, "token_generation")
 		return Receipt{}, err
 	}
 	r.commitToken = token
 	r.state = Approved
 	m.auditLocked(id, "approved", r.transaction.CandidateDigest)
 	return Receipt{TransactionID: id, State: Approved, CandidateID: r.transaction.CandidateID, OutputSHA256: r.transaction.CandidateOutputSHA256, CommitToken: token}, nil
+}
+
+func verifyFileRevision(path, expectedSHA string) error {
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if engine.SHA(bytes) != expectedSHA {
+		return ErrStale
+	}
+	return nil
 }
 
 // Commit consumes the one-time capability, rechecks the source version and
@@ -370,6 +503,16 @@ func (m *Manager) Reject(id, reconToken string) error {
 	}
 	if !equalToken(r.reconToken, reconToken) {
 		return ErrToken
+	}
+	if r.state == Validating {
+		// Request cancellation but do not release the scope until the
+		// trusted validator returns and Phase 3 finishes. This prevents
+		// overlapping executions when the validator ignores cancellation.
+		if r.cancelValidation != nil {
+			r.cancelValidation()
+		}
+		m.auditLocked(id, "cancel_requested", r.transaction.CandidateDigest)
+		return nil
 	}
 	m.rejectLocked(id, r, "client_cancel")
 	return nil

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,8 +126,8 @@ func TestOneTimeCommitTokenAndAudit(t *testing.T) {
 		t.Fatalf("replay should fail: %v", err)
 	}
 	events := m.AuditSnapshot()
-	if len(events) != 4 {
-		t.Fatalf("got %d audit events, want 4", len(events))
+	if len(events) != 5 {
+		t.Fatalf("got %d audit events, want 5", len(events))
 	}
 	prior := ""
 	for i, e := range events {
@@ -267,5 +268,236 @@ func TestCanceledValidationNeverApproves(t *testing.T) {
 	cancel()
 	if receipt, err := m.Validate(ctx, req.TransactionID, menu.ReconToken); err == nil || receipt.CommitToken != "" {
 		t.Fatal("canceled validation generated approval token")
+	}
+}
+
+// gatedOracle suspends one source file's validation. It deliberately may
+// ignore context cancellation to verify that the manager retains the file
+// reservation until the real backend has *returned*.
+type gatedOracle struct {
+	blockPath string
+	entered   chan struct{}
+	release   chan struct{}
+	ignoreCtx bool
+}
+
+func (o *gatedOracle) Validate(ctx context.Context, work validationWork) error {
+	if engine.SHA(work.candidateSource) != work.candidateOutputSHA256 {
+		return errors.New("candidate changed")
+	}
+	if work.sourceFile != o.blockPath {
+		return ctx.Err()
+	}
+	select {
+	case o.entered <- struct{}{}:
+	default:
+	}
+	if o.ignoreCtx {
+		<-o.release
+		return nil
+	}
+	select {
+	case <-o.release:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type validationOutcome struct {
+	receipt Receipt
+	err     error
+}
+
+func awaitValidation(t *testing.T, results <-chan validationOutcome) validationOutcome {
+	t.Helper()
+	select {
+	case got := <-results:
+		return got
+	case <-time.After(3 * time.Second):
+		t.Fatal("validation did not finish")
+		return validationOutcome{}
+	}
+}
+
+func awaitEntry(t *testing.T, entered <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("oracle was not entered")
+	}
+}
+
+func independentRequest(t *testing.T, req agentproto.RecognitionRequest, src []byte) agentproto.RecognitionRequest {
+	t.Helper()
+	newPath := filepath.Join(t.TempDir(), "wallet.go")
+	if err := os.WriteFile(newPath, src, 0600); err != nil {
+		t.Fatal(err)
+	}
+	req.TransactionID = "tx-second"
+	req.Selector.File = newPath
+	return req
+}
+
+func TestIndependentFilesValidateWithoutGlobalLock(t *testing.T) {
+	m, req, path, src := setup(t, true)
+	oracle := &gatedOracle{blockPath: path, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	m.oracle = oracle // test-only injection inside this trusted package
+	menuA := beginChoose(t, m, req)
+	reqB := independentRequest(t, req, src)
+
+	resultA := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(context.Background(), req.TransactionID, menuA.ReconToken)
+		resultA <- validationOutcome{r, err}
+	}()
+	awaitEntry(t, oracle.entered)
+	// Begin/Discover and Choose must also work on B while A validates.
+	menuB := beginChoose(t, m, reqB)
+
+	resultB := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(context.Background(), reqB.TransactionID, menuB.ReconToken)
+		resultB <- validationOutcome{r, err}
+	}()
+	// B must finish before A's validator is released. This is a controlled
+	// concurrency proof rather than an unreliable sub-100ms timing assertion.
+	gotB := awaitValidation(t, resultB)
+	if gotB.err != nil || gotB.receipt.State != Approved {
+		t.Fatalf("independent validation was blocked/rejected: %+v", gotB)
+	}
+	otherA := req
+	otherA.TransactionID = "tx-conflict"
+	if _, err := m.Begin(otherA); !errors.Is(err, ErrLocked) {
+		t.Fatalf("same file must be reserved while A validates: %v", err)
+	}
+	close(oracle.release)
+	gotA := awaitValidation(t, resultA)
+	if gotA.err != nil || gotA.receipt.State != Approved {
+		t.Fatalf("A unexpectedly failed after unblock: %+v", gotA)
+	}
+	if _, err := m.Begin(otherA); !errors.Is(err, ErrLocked) {
+		t.Fatalf("scope must remain reserved after approval, until commit/reject: %v", err)
+	}
+	if err := m.Reject(req.TransactionID, menuA.ReconToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Reject(reqB.TransactionID, menuB.ReconToken); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRejectDuringUncooperativeValidationKeepsLock(t *testing.T) {
+	m, req, path, _ := setup(t, true)
+	oracle := &gatedOracle{blockPath: path, entered: make(chan struct{}, 1), release: make(chan struct{}), ignoreCtx: true}
+	m.oracle = oracle
+	menu := beginChoose(t, m, req)
+	out := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(context.Background(), req.TransactionID, menu.ReconToken)
+		out <- validationOutcome{r, err}
+	}()
+	awaitEntry(t, oracle.entered)
+	if _, err := m.Validate(context.Background(), req.TransactionID, menu.ReconToken); !errors.Is(err, ErrState) {
+		t.Fatalf("duplicate validation started: %v", err)
+	}
+	if err := m.Reject(req.TransactionID, menu.ReconToken); err != nil {
+		t.Fatal(err)
+	}
+	second := req
+	second.TransactionID = "tx-second"
+	if _, err := m.Begin(second); !errors.Is(err, ErrLocked) {
+		t.Fatalf("cancel released file before validator stopped: %v", err)
+	}
+	close(oracle.release)
+	got := awaitValidation(t, out)
+	if !errors.Is(got.err, context.Canceled) || got.receipt.CommitToken != "" {
+		t.Fatalf("canceled validator still approved: %+v", got)
+	}
+	if _, err := m.Begin(second); err != nil {
+		t.Fatalf("canceled validator leaked scope: %v", err)
+	}
+}
+
+func TestExpiredValidationDoesNotFreeRunningScope(t *testing.T) {
+	m, req, path, _ := setup(t, true)
+	clock := time.Now()
+	var nowNano atomic.Int64
+	nowNano.Store(clock.UnixNano())
+	m.now = func() time.Time { return time.Unix(0, nowNano.Load()) }
+	oracle := &gatedOracle{blockPath: path, entered: make(chan struct{}, 1), release: make(chan struct{}), ignoreCtx: true}
+	m.oracle = oracle
+	menu := beginChoose(t, m, req)
+	out := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(context.Background(), req.TransactionID, menu.ReconToken)
+		out <- validationOutcome{r, err}
+	}()
+	awaitEntry(t, oracle.entered)
+	nowNano.Store(clock.Add(2 * time.Minute).UnixNano())
+	second := req
+	second.TransactionID = "tx-new-after-expiration"
+	if _, err := m.Begin(second); !errors.Is(err, ErrLocked) {
+		t.Fatalf("expiry prematurely released running scope: %v", err)
+	}
+	close(oracle.release)
+	got := awaitValidation(t, out)
+	if got.err == nil || got.receipt.CommitToken != "" {
+		t.Fatalf("expired validation approved: %+v", got)
+	}
+	if _, err := m.Begin(second); err != nil {
+		t.Fatalf("expired validation leaked scope: %v", err)
+	}
+}
+
+func TestSlowValidationRejectsExternalFileChange(t *testing.T) {
+	m, req, path, _ := setup(t, true)
+	oracle := &gatedOracle{blockPath: path, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	m.oracle = oracle
+	menu := beginChoose(t, m, req)
+	out := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(context.Background(), req.TransactionID, menu.ReconToken)
+		out <- validationOutcome{r, err}
+	}()
+	awaitEntry(t, oracle.entered)
+	replacement := []byte("package wallet\nfunc Replaced() {}\n")
+	if err := os.WriteFile(path, replacement, 0600); err != nil {
+		t.Fatal(err)
+	}
+	close(oracle.release)
+	got := awaitValidation(t, out)
+	if !errors.Is(got.err, ErrStale) || got.receipt.CommitToken != "" {
+		t.Fatalf("external write should reject validation: %+v", got)
+	}
+	src, _ := os.ReadFile(path)
+	if string(src) != string(replacement) {
+		t.Fatalf("external file unexpectedly overwritten: %q", src)
+	}
+}
+
+func TestContextCancellationDuringValidationReleasesLock(t *testing.T) {
+	m, req, path, _ := setup(t, true)
+	oracle := &gatedOracle{blockPath: path, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	m.oracle = oracle
+	menu := beginChoose(t, m, req)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan validationOutcome, 1)
+	go func() {
+		r, err := m.Validate(ctx, req.TransactionID, menu.ReconToken)
+		out <- validationOutcome{r, err}
+	}()
+	awaitEntry(t, oracle.entered)
+	cancel()
+	got := awaitValidation(t, out)
+	if !errors.Is(got.err, context.Canceled) || got.receipt.CommitToken != "" {
+		t.Fatalf("cancel must reject without capability: %+v", got)
+	}
+	other := req
+	other.TransactionID = "tx-next"
+	if _, err := m.Begin(other); err != nil {
+		t.Fatalf("scope not released after validator stopped: %v", err)
 	}
 }

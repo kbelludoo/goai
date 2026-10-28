@@ -33,8 +33,24 @@ _, err := manager.Validate(ctx, menu.TransactionID, menu.ReconToken)
   "pass"}` has no effect on authoritative state.
 - File locks are intentionally **whole-file**, not semantic/symbol locks;
   this is conservative because the current edit pipeline formats the whole
-  file. Expired locks are reclaimed lazily when accessing transactions or
-  starting a new one.
+  file. A map reservation implements this without blocking a scope mutex while
+  holding the global mutex: conflicting requests return `ErrLocked` immediately.
+- `Begin` now reserves a private `preparing` record, performs AST discovery and
+  candidate preflight **outside** the global mutex, and publishes the sealed
+  catalogue only after rechecking expiry/source revision. Failed discovery
+  releases the reservation.
+- `Validate` has three phases: (1) lock briefly and reserve `validating`, copy
+  the candidate and derive a context deadline from the transaction TTL; (2)
+  release the global mutex, check the source and run the privileged oracle; (3)
+  lock again to reject or approve after checking cancellation/expiry, candidate
+  digest and source revision. Independent files can validate concurrently.
+- A scope is held through `preparing`, `validating`, and `approved` until the
+  relevant operation actually finishes and/or reaches `committed` or `rejected`.
+  If cancellation or expiration occurs *during* a still-running validator,
+  the manager requests cancellation but **does not release the scope early**.
+  Client `Reject` during validation requests cancellation; final rejection
+  happens after the validator returns. Other callers receive `ErrLocked`.
+  Expired inactive records are reclaimed lazily.
 - Errors are exported as Go sentinels (`ErrLocked`, `ErrState`, `ErrToken`,
   `ErrExpired`, `ErrStale`, `ErrValidatorUnavailable`). Clients can map them to
   structured error codes without parsing arbitrary text.
@@ -65,13 +81,26 @@ _, err := manager.Validate(ctx, menu.TransactionID, menu.ReconToken)
    be handled by the privileged service before accepting arbitrary agent paths.
 6. Tests using a synthetic in-package oracle prove state-machine invariants
    **under the assumed trusted validator**, not that real tests executed.
+7. Cancellation is **cooperative** until the sandbox executor exists. A backend
+   that never returns can retain its scope indefinitely; fail-closed is safer
+   than reusing a file while untrusted work may still be active. The executor
+   must enforce deadlines and kill whole process trees, independently tested.
+8. New `preparing` reservations prevent duplicate/disputed discoveries but AST
+   scanning has no context cancel API yet; constrain input size and processing
+   time before exposing this service to hostile multi-tenant workloads.
+9. Version hashes and an in-process scope map do not prevent external writes,
+   TOCTOU races, symlink aliasing or hostile processes sharing a filesystem.
 
 ## Regression coverage
 
 The in-package negative tests attempt forged candidate IDs, forged tokens,
 reused commit tokens, unvalidated commits, canceled/failed validations,
 source revision conflicts, scope lock clashes, expiry and concurrent replay.
-`go test -race ./...` exercises manager locks and concurrent commit attempts.
+New channel-coordinated tests cover independent-file parallel validation and
+reconnaissance, duplicate validation rejection, conflicting-file lock retention,
+client cancellation, non-cooperative validators, expiry, external file edits
+and cleanup after completion. No flaky fixed `100ms` performance threshold is
+used. `go test -race ./...` exercises manager locks and concurrent attempts.
 
 ## Next (Issue #2)
 
