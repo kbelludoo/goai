@@ -150,3 +150,12 @@ exercise the positive path only with a synthetic *in-package* validator.
 The project has **no secure sandbox** or durable transaction manager yet.
 See [transaction manager design](docs/txmanager-0.2.md) for guarantees and
 limitations.
+
+### Revision-checked cooperative commit (Linux, design increment)
+
+The transaction manager's single-file write path now uses
+`internal/atomicwriter` to stage a replacement, acquire a persistent Linux
+`flock` sidecar, check original content and inode identity, and atomically
+rename on a matching revision. This **does not** create kernel-level CAS,
+securely isolate paths, stop non-cooperating IDE/Git writes, or make the sandbox
+available. See [writer limitations](docs/atomicwriter-0.2.md).
