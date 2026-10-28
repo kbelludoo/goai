@@ -33,7 +33,7 @@ func Evaluate(rootPath string, limits Limits) Decision {
 		CPUPeriodUS:    limits.CPUPeriodUS,
 		PIDsMax:        limits.PIDsMax,
 	}
-	if err := ValidateLimits(converted); err != nil {
+	if err := cgroupv2.ValidateLimits(converted); err != nil {
 		d.add("limits", StatusFail, "GOAI-CGROUP-003", err.Error())
 	} else {
 		d.add("limits", StatusOK, "", "memory, cpu and pids budgets are set")
