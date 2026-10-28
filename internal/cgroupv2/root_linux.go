@@ -67,8 +67,14 @@ func At(dir string) (Root, error) {
 		return Root{}, err
 	}
 	relative, err := filepath.Rel(mountpoint, dir)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return Root{}, ErrNotADirectory
+	}
+	if relative == "." {
+		// The root of the hierarchy is the host's (or container's) own budget.
+		// Subdividing it would make every GoAI limit depend on unrelated
+		// workloads, so it must never be treated as a delegated subtree.
+		return Root{}, errors.Join(ErrNotADirectory, errors.New("the cgroup2 mount root is not a delegation root"))
 	}
 	actualRoot, err := filepath.EvalSymlinks(mountpoint)
 	if err != nil {

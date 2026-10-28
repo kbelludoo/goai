@@ -54,8 +54,12 @@ func TestAtAcceptsOnlyRealCgroupDirectories(t *testing.T) {
 		t.Skipf("no cgroup2 mount: %v", err)
 	}
 	// The current cgroup exists on the mount and is a directory. Whether it is
-	// writable is host policy; At must fail with a delegation error, never with
+	// writable is host policy: At must fail with a delegation error, never with
 	// ErrNotADirectory, when the only problem is permissions.
+	//
+	// Exception: when the process runs at the top of the hierarchy (common in
+	// CI containers, where /proc/self/cgroup is "0::/"), the current cgroup IS
+	// the mount root, which At rejects on purpose.
 	cgroupText, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		t.Skip("no /proc/self/cgroup")
@@ -66,6 +70,13 @@ func TestAtAcceptsOnlyRealCgroupDirectories(t *testing.T) {
 	}
 	if !strings.HasPrefix(loc.Parent(), mountpoint) {
 		t.Fatalf("resolved outside mount: %q", loc.Parent())
+	}
+	if loc.Parent() == mountpoint {
+		_, err := At(loc.Parent())
+		if !errors.Is(err, ErrNotADirectory) {
+			t.Fatalf("mount root must be refused as a delegation root, got %v", err)
+		}
+		t.Skip("process runs at the top of the cgroup hierarchy; nested delegation root unavailable")
 	}
 	_, err = At(loc.Parent())
 	if err != nil && errors.Is(err, ErrNotADirectory) {
