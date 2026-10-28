@@ -13,7 +13,10 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 4 {
+	// Two positional arguments are the minimum: the cgroup and the absolute
+	// target. Requiring a third made `goai-cgroup-exec /cgroup /bin/true` fail
+	// with a usage error even though the command is well formed.
+	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: goai-cgroup-exec <prepared-cgroup> <absolute-target> [args...]")
 		os.Exit(126)
 	}
