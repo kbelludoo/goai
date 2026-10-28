@@ -117,3 +117,10 @@ and no results, efficiency gains, or external benchmark tasks are claimed.
 go test ./...
 go run ./cmd/goai-bench -file /path/to/real-runs.jsonl
 ```
+
+## Constant-agent benchmark driver (experimental)
+
+`internal/benchdriver` adds a bounded four-mode tool-loop interface with
+scripted tests. See [benchmark/driver.md](benchmark/driver.md). It neither
+calls real LLMs nor runs untrusted code or hidden tests; no comparative
+performance claims have been measured.
