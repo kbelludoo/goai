@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kbelludoo/goai/blob/main/benchmark/run.schema.json",
+  "title": "GoAI 0.1 benchmark JSONL run record",
+  "description": "One completed (task, modality, model, replicate) observation. Source of truth is the trusted benchmark harness, never agent testimony.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "task_id",
+    "category",
+    "modality",
+    "replicate",
+    "model",
+    "provenance",
+    "token_budget",
+    "wall_time_ms",
+    "usage_source",
+    "model_calls",
+    "tool_events",
+    "edit_attempts",
+    "coverage",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "goai.bench.v0.1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "enum": [
+        "micro_logic",
+        "structural",
+        "domain"
+      ]
+    },
+    "modality": {
+      "enum": [
+        "m1_text",
+        "m2_text_diagnostics",
+        "m3_ast",
+        "m4_intent_catalog"
+      ]
+    },
+    "replicate": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "id",
+        "revision",
+        "temperature"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "seed": {
+          "type": "integer"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_sha256",
+        "task_sha256",
+        "prompt_sha256",
+        "tool_policy_sha256",
+        "harness_commit",
+        "base_commit"
+      ],
+      "properties": {
+        "dataset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "task_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "tool_policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "harness_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_commit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "token_budget": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "wall_time_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "usage_source": {
+      "enum": [
+        "provider",
+        "estimated",
+        "unavailable"
+      ]
+    },
+    "model_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "input_tokens",
+          "output_tokens",
+          "cached_input_tokens",
+          "reasoning_output_tokens",
+          "latency_ms"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cached_input_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reasoning_output_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "latency_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "tool_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "output_bytes",
+          "fed_to_model",
+          "latency_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "estimated_output_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fed_to_model": {
+            "type": "boolean"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "edit_attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "accepted_by_tool",
+          "public_tests",
+          "latency_ms"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "accepted_by_tool": {
+            "type": "boolean"
+          },
+          "public_tests": {
+            "enum": [
+              "pass",
+              "fail",
+              "not_run"
+            ]
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error_log_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "candidate_count",
+        "fallback_to_text"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_applicable",
+            "supported",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "candidate_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback_to_text": {
+          "type": "boolean"
+        },
+        "fallback_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "public_tests",
+        "hidden_tests",
+        "end_reason"
+      ],
+      "properties": {
+        "public_tests": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_run"
+          ]
+        },
+        "hidden_tests": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_run"
+          ]
+        },
+        "end_reason": {
+          "enum": [
+            "completed",
+            "unsupported",
+            "timeout",
+            "infra_error",
+            "budget_exhausted"
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "usage_source": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "model_calls": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "usage_source": {
+            "enum": [
+              "provider",
+              "estimated"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "model_calls": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "modality": {
+            "enum": [
+              "m1_text",
+              "m2_text_diagnostics"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "coverage": {
+            "properties": {
+              "status": {
+                "const": "not_applicable"
+              },
+              "candidate_count": {
+                "const": 0
+              },
+              "fallback_to_text": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "modality": {
+            "enum": [
+              "m3_ast",
+              "m4_intent_catalog"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "coverage": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "supported",
+                  "unsupported",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
