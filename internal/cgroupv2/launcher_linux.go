@@ -261,30 +261,38 @@ func ExecPrepared(groupPath, targetPath string, argv []string) error {
 	if err != nil || st.IsDir() || st.Mode()&0111 == 0 {
 		return errors.Join(ErrLaunchDenied, err)
 	}
-	return launchPrepared(groupPath, targetPath, argv, verifyTarget, joinSelf, closeInheritedFDs, syscall.Exec)
+	return launchPrepared(groupPath, targetPath, argv, verifyTarget, joinSelf, openExecutable, closeInheritedFDs, execveatFD)
 }
 
-// launchPrepared enforces check -> self-migration -> descriptor scrub -> exec,
-// in that order. Dependencies are injectable ONLY to exercise sequencing in unit
-// tests; production always uses the real cgroup kernel API and syscall.Exec.
+// launchPrepared enforces check -> self-migration -> pin executable ->
+// descriptor scrub -> execveat, in that order. Dependencies are injectable ONLY
+// to exercise sequencing in unit tests; production uses the real cgroup kernel
+// API, a pinned descriptor and execveat(AT_EMPTY_PATH).
 func launchPrepared(groupPath, targetPath string, argv []string,
 	check func(string) error, join func(string) error,
+	open func(string) (int, error),
 	scrub func(...int) error,
-	replace func(string, []string, []string) error) error {
+	execFD func(int, []string, []string) error) error {
 	if err := check(groupPath); err != nil {
 		return err
 	}
 	if err := join(groupPath); err != nil {
 		return err
 	}
-	if err := scrub(); err != nil {
+	fd, err := open(targetPath)
+	if err != nil {
 		return err
 	}
-	// Strip host credentials/proxy settings. The real sandbox must also filter
-	// mounts and inherited descriptors independently. No user env passthrough.
+	// Keep the pinned executable descriptor; everything else above stderr goes.
+	if err := scrub(fd); err != nil {
+		syscall.Close(fd)
+		return err
+	}
+	// Strip host credentials/proxy settings. Mounts and namespaces are still the
+	// sandbox backend's job: this only governs the process environment.
 	env := []string{
 		"PATH=/usr/bin:/bin", "HOME=/workspace", "TMPDIR=/tmp", "LANG=C",
 		"GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0",
 	}
-	return replace(targetPath, argv, env)
+	return execFD(fd, argv, env)
 }

@@ -21,10 +21,11 @@ func TestLaunchSequencingAndEnvIsolation(t *testing.T) {
 	err := launchPrepared("/a", "/bin/safe", []string{"/bin/safe"},
 		func(string) error { events = append(events, "check"); return nil },
 		func(string) error { events = append(events, "join"); return nil },
+		func(string) (int, error) { events = append(events, "open"); return 7, nil },
 		func(...int) error { events = append(events, "scrub"); return nil },
-		func(path string, args, env []string) error {
+		func(fd int, args, env []string) error {
 			events = append(events, "exec")
-			if path != "/bin/safe" || args[0] != path {
+			if fd != 7 || args[0] != "/bin/safe" {
 				t.Fatal("bad target")
 			}
 			if strings.Contains(strings.Join(env, " "), needle) || strings.Contains(strings.Join(env, " "), "GOAI_TEST_SECRET") {
@@ -35,13 +36,13 @@ func TestLaunchSequencingAndEnvIsolation(t *testing.T) {
 			}
 			return nil
 		})
-	if err != nil || !reflect.DeepEqual(events, []string{"check", "join", "scrub", "exec"}) {
+	if err != nil || !reflect.DeepEqual(events, []string{"check", "join", "open", "scrub", "exec"}) {
 		t.Fatalf("bad execution sequence: %v %v", events, err)
 	}
 }
 func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 	marker := errors.New("failed")
-	for _, phase := range []string{"check", "join", "scrub"} {
+	for _, phase := range []string{"check", "join", "open", "scrub"} {
 		var events []string
 		err := launchPrepared("/a", "/bin/safe", []string{"/bin/safe"},
 			func(string) error {
@@ -58,6 +59,7 @@ func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 				}
 				return nil
 			},
+			func(string) (int, error) { events = append(events, "open"); return 7, nil },
 			func(...int) error {
 				events = append(events, "scrub")
 				if phase == "scrub" {
@@ -65,7 +67,7 @@ func TestLaunchDoesNotExecOnCheckOrJoinFailure(t *testing.T) {
 				}
 				return nil
 			},
-			func(string, []string, []string) error { events = append(events, "exec"); return nil })
+			func(int, []string, []string) error { events = append(events, "exec"); return nil })
 		if !errors.Is(err, marker) || slicesContain(events, "exec") {
 			t.Fatalf("executed after failed %s: %v %v", phase, err, events)
 		}

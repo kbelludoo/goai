@@ -153,8 +153,9 @@ func TestScrubFailurePreventsExec(t *testing.T) {
 	err := launchPrepared("/a", "/bin/safe", []string{"/bin/safe"},
 		func(string) error { events = append(events, "check"); return nil },
 		func(string) error { events = append(events, "join"); return nil },
+		func(string) (int, error) { events = append(events, "open"); return 7, nil },
 		func(...int) error { events = append(events, "scrub"); return marker },
-		func(string, []string, []string) error { events = append(events, "exec"); return nil })
+		func(int, []string, []string) error { events = append(events, "exec"); return nil })
 	if !errors.Is(err, marker) || slicesContain(events, "exec") {
 		t.Fatalf("exec ran after a failed scrub: %v %v", err, events)
 	}
