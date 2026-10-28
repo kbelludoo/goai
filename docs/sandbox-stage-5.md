@@ -57,11 +57,11 @@ Four properties make this a check rather than a hope:
 - **The fd is the anchor.** It is opened once on the freshly created cgroup with
   `O_DIRECTORY|O_CLOEXEC`, so a later path rename cannot retarget it and the
   child never inherits it.
-- **No silent downgrade.** `crypto/syscall`-level details aside, Go's runtime
-  builds a `clone3` call only when `UseCgroupFD` is set, and reports the syscall
-  error verbatim. There is no fallback path that would start the child unlimited;
-  `ErrCloneIntoUnavailable` (ENOSYS/EINVAL/EACCES/EPERM/EBADF/ENOENT) is returned
-  and nothing runs.
+- **No silent downgrade.** In Go 1.23's `syscall/exec_linux.go`, a `clone3`
+  call is built *only* when `UseCgroupFD` is set, and there is no `ENOSYS`
+  fallback branch that would re-`clone` without placement. The syscall error is
+  returned verbatim, so `ErrCloneIntoUnavailable`
+  (ENOSYS/EINVAL/EACCES/EPERM/EBADF/ENOENT) means nothing ran.
 - **Membership is verified.** `VerifyContains(pid)` requires the cgroup to hold
   exactly the child. Anything else kills the child and returns
   `ErrPlacementUnverified`. An empty cgroup is *not* treated as success, because

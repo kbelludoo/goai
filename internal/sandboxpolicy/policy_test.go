@@ -20,7 +20,7 @@ func TestParseLimits(t *testing.T) {
 		{"", Limits{}, "GOAI-POLICY-002"},
 		{"512/50%/100", Limits{}, "GOAI-POLICY-005"},
 		{"512MiB/0%/100", Limits{}, "GOAI-POLICY-006"},
-		{"512MiB/50", Limits{}, "GOAI-POLICY-006"},
+		{"512MiB/50", Limits{}, "GOAI-POLICY-003"}, // wrong arity is a shape error, not a unit error
 		{"512MiB/50%/0", Limits{}, "GOAI-POLICY-004"},
 		{"512MiB/50%", Limits{}, "GOAI-POLICY-003"},
 		{"9999999999GiB/50%/10", Limits{}, "GOAI-POLICY-005"},
@@ -54,20 +54,29 @@ func TestEmptyLimitsAreNotUnlimited(t *testing.T) {
 }
 
 func TestDenyRequiresNoFailureAndNoUnknown(t *testing.T) {
-	ok := Decision{Checks: []Check{{Name: "a", Status: StatusOK}, {Name: "b", Status: StatusWarn}}}
+	// Checks are added through add(), as Evaluate does, so reasons are recorded.
+	ok := Decision{Checks: []Check{}}
+	ok.add("a", StatusOK, "", "")
+	ok.add("b", StatusWarn, "", "")
 	ok.deny()
 	if !ok.Allowed {
 		t.Fatal("warnings must not deny")
 	}
-	unknown := Decision{Checks: []Check{{Name: "a", Status: StatusOK}, {Name: "b", Status: StatusUnknown}}}
+	unknown := Decision{Checks: []Check{}}
+	unknown.add("a", StatusOK, "", "")
+	unknown.add("b", StatusUnknown, "GOAI-X-002", "not verified")
 	unknown.deny()
 	if unknown.Allowed {
 		t.Fatal("an unproven check must deny")
 	}
-	failed := Decision{Checks: []Check{{Name: "a", Status: StatusFail, Code: "GOAI-X-001"}}}
+	failed := Decision{Checks: []Check{}}
+	failed.add("a", StatusFail, "GOAI-X-001", "")
 	failed.deny()
-	if failed.Allowed || len(failed.Reasons) != 1 || failed.Reasons[0] != "GOAI-X-001" {
-		t.Fatalf("unexpected decision: %+v", failed)
+	if failed.Allowed {
+		t.Fatal("a failed check must deny")
+	}
+	if len(failed.Reasons) != 1 || failed.Reasons[0] != "GOAI-X-001" {
+		t.Fatalf("unexpected reasons: %+v", failed.Reasons)
 	}
 }
 
