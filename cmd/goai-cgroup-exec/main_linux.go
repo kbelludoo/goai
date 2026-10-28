@@ -1,30 +1,87 @@
 //go:build linux
 
 // goai-cgroup-exec is a trusted internal launcher, not an agent-facing tool.
-// It migrates itself to an already-limited cgroup before execve of its target.
+//
+// It accepts a launch request only from the supervisor named in its installed
+// policy, verifies that identity with the kernel (SO_PEERCRED on an inherited
+// unix socket), checks the request against the policy, migrates itself into the
+// prepared cgroup, and execs the pinned executable. A caller cannot pass a
+// cgroup path or an executable path by argument: those are policy outcomes.
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 
 	"github.com/kbelludoo/goai/internal/cgroupv2"
 )
 
+const maxRequestBytes = 64 << 10
+
 func main() {
-	// Two positional arguments are the minimum: the cgroup and the absolute
-	// target. Requiring a third made `goai-cgroup-exec /cgroup /bin/true` fail
-	// with a usage error even though the command is well formed.
-	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: goai-cgroup-exec <prepared-cgroup> <absolute-target> [args...]")
-		os.Exit(126)
+	authorityPath := os.Getenv("GOAI_AUTHORITY_CONFIG")
+	if len(os.Args) > 2 && os.Args[1] == "-authority" {
+		authorityPath = os.Args[2]
 	}
-	target := os.Args[2]
-	err := cgroupv2.ExecPrepared(os.Args[1], target, os.Args[2:])
-	// Fail-closed: no target has started if validation or migration failed.
-	fmt.Fprintln(os.Stderr, "goai-cgroup-exec:", err)
-	if errors.Is(err, cgroupv2.ErrLaunchDenied) || errors.Is(err, cgroupv2.ErrJoinFailed) {
+	authority, err := cgroupv2.LoadAuthorityFile(authorityPath)
+	if err != nil {
+		fail("authority", err)
+	}
+	ticket, err := authorizeRequest(authority)
+	if err != nil {
+		fail("authorize", err)
+	}
+	// On success the process image is replaced; nothing below runs.
+	err = ticket.Exec()
+	fail("exec", err)
+}
+
+// authorizeRequest reads exactly one bounded request from the supervisor socket
+// inherited as fd 3 and turns it into a Ticket.
+func authorizeRequest(authority cgroupv2.Authority) (cgroupv2.Ticket, error) {
+	file := os.NewFile(3, "supervisor")
+	if file == nil {
+		return cgroupv2.Ticket{}, errors.New("supervisor socket missing (expected fd 3)")
+	}
+	conn, err := net.FileConn(file)
+	if err != nil {
+		return cgroupv2.Ticket{}, fmt.Errorf("supervisor socket: %w", err)
+	}
+	defer conn.Close()
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return cgroupv2.Ticket{}, errors.New("supervisor channel must be a unix socket")
+	}
+	peer, err := cgroupv2.PeerFromUnixConn(unixConn)
+	if err != nil {
+		return cgroupv2.Ticket{}, err
+	}
+	var request cgroupv2.Request
+	dec := json.NewDecoder(io.LimitReader(conn, maxRequestBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&request); err != nil {
+		return cgroupv2.Ticket{}, fmt.Errorf("request: %w", err)
+	}
+	return authority.Authorize(peer, request)
+}
+
+// fail is fail-closed: no workload runs after any error.
+func fail(stage string, err error) {
+	fmt.Fprintln(os.Stderr, "goai-cgroup-exec:", stage+":", err)
+	switch {
+	case errors.Is(err, cgroupv2.ErrUnauthorized):
+		os.Exit(125)
+	case errors.Is(err, cgroupv2.ErrLaunchDenied),
+		errors.Is(err, cgroupv2.ErrJoinFailed),
+		errors.Is(err, cgroupv2.ErrNotExclusive),
+		errors.Is(err, cgroupv2.ErrGroupNotOwned),
+		errors.Is(err, cgroupv2.ErrPolicyDenied),
+		errors.Is(err, cgroupv2.ErrAuthorityUnusable),
+		errors.Is(err, cgroupv2.ErrExecutableChanged):
 		os.Exit(126)
 	}
 	os.Exit(127)

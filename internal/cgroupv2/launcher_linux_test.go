@@ -96,7 +96,8 @@ func TestFakeCgroupRejectedBeforeTargetExecution(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := ExecPrepared(fake, "/bin/sh", []string{"/bin/sh", "-c", "touch '" + marker + "'"}); !errors.Is(err, ErrLaunchDenied) {
+	ticket := Ticket{cgroup: fake, target: "/bin/sh", argv: []string{"/bin/sh", "-c", "touch '" + marker + "'"}}
+	if err := ticket.Exec(); !errors.Is(err, ErrLaunchDenied) {
 		t.Fatalf("fake cgroup accepted: %v", err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

@@ -66,7 +66,9 @@ func checkParentDirs(path string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("%w: %s is not a directory", ErrExecutableChanged, dir)
 		}
-		if info.Mode().Perm()&0022 != 0 {
+		// A sticky world-writable directory (/tmp) is acceptable: others cannot
+		// rename or delete entries they do not own. A plain 0777 directory is not.
+		if info.Mode().Perm()&0022 != 0 && info.Mode()&os.ModeSticky == 0 {
 			return fmt.Errorf("%w: %s is writable by group or other", ErrExecutableChanged, dir)
 		}
 		parent := filepath.Dir(dir)

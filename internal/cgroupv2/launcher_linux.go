@@ -248,12 +248,18 @@ func closeInheritedFDs(keep ...int) error {
 	return nil
 }
 
-// ExecPrepared is the privileged launch boundary. Only trusted launcher code
+// execPrepared is the privileged launch boundary. Only trusted launcher code
 // can choose targetPath and argv. No untrusted workload is run until AFTER
 // the process has joined and verified its cgroup. syscall.Exec preserves PID.
 // The caller must still implement cgroup cleanup, bwrap namespaces, resource
 // budget policy and process-tree shutdown. On success this never returns.
-func ExecPrepared(groupPath, targetPath string, argv []string) error {
+//
+// It is unexported on purpose: the only production entry point is Ticket.Exec,
+// which cannot be built without an Authority approving the request. Accepting a
+// cgroup path and an executable path directly from a caller would make authority
+// a matter of path shape, which any process able to create a limited cgroup
+// could satisfy.
+func execPrepared(groupPath, targetPath string, argv []string) error {
 	if !filepath.IsAbs(targetPath) || len(argv) == 0 || argv[0] != targetPath {
 		return ErrLaunchDenied
 	}
