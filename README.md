@@ -192,3 +192,12 @@ process inside a Bubblewrap PID namespace. It uses a host-visible, nonce-bound
 See [the stage-3 design](docs/sandbox-stage-3.md). The real isolation test is
 opt-in; neither these canaries nor `CGO_ENABLED=0` prove a safe untrusted
 executor. The public transaction manager still cannot authorize commits.
+
+## Issue #2 stage 4: fail-closed cgroup v2 discovery (not an executor)
+
+`internal/cgroupv2` locates the running process's cgroup v2 membership using
+`/proc/self/cgroup` and `/proc/self/mountinfo`, verifies resource-controller
+**delegation**, and can prepare an empty child with verified CPU, memory and
+PID limits. It cannot yet launch or attach untrusted processes: attaching a
+running `bwrap` by PID is racy and expressly forbidden until a trusted pre-exec
+placement mechanism is implemented. See [stage 4 design](docs/sandbox-stage-4.md).
