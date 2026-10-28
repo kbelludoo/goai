@@ -63,11 +63,12 @@ _, err := manager.Validate(ctx, menu.TransactionID, menu.ReconToken)
 1. **No sandbox exists.** A goroutine is not isolation. Running `go test` on
    untrusted agent-written code in the host is out of scope and prohibited in
    this phase. Future isolated executors need independent adversarial tests.
-2. The current writer uses a single-file temporary-file/rename mechanism and
-   has a race window against *external* writers between its final pre-check and
-   rename. It is **not** a guaranteed filesystem CAS or multi-file commit.
-   A future privileged committer needs stronger filesystem coordination and
-   scope authorization.
+2. The transaction manager now calls the Linux cooperative `atomicwriter`
+   with a persistent sidecar `flock`, two revision/identity checks and a
+   same-directory rename. It still has a TOCTOU window against *external*
+   **non-cooperating** writers, and is neither a guaranteed filesystem CAS
+   nor a multi-file commit. See `docs/atomicwriter-0.2.md`. A privileged
+   committer still needs stricter workspace coordination and authorization.
 3. The manager is in-memory only: restarting the process invalidates all
    capabilities and loses the audit history. This is safe against replay after
    restart, but not durable, nor a distributed transaction manager.

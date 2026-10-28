@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kbelludoo/goai/internal/agentproto"
+	"github.com/kbelludoo/goai/internal/atomicwriter"
 	"github.com/kbelludoo/goai/internal/engine"
 	"github.com/kbelludoo/goai/internal/recon"
 )
@@ -454,8 +455,8 @@ func verifyFileRevision(path, expectedSHA string) error {
 }
 
 // Commit consumes the one-time capability, rechecks the source version and
-// calls the existing single-file atomic writer. This is NOT a multi-file
-// transaction, and the underlying writer has an external-writer TOCTOU window.
+// calls the Linux cooperative, revision-checked single-file atomic writer.
+// This is NOT multi-file CAS; external uncooperative writers can still race.
 // No production commit is possible until a trusted validator is installed.
 func (m *Manager) Commit(id, commitToken string) (Receipt, error) {
 	m.mu.Lock()
@@ -481,8 +482,11 @@ func (m *Manager) Commit(id, commitToken string) (Receipt, error) {
 	}
 	// A failed write is terminal; no replay of the token.
 	r.commitToken = ""
-	if err := engine.WriteAtomic(r.file, source, string(r.candidateSource)); err != nil {
+	if err := atomicwriter.Replace(r.file, engine.SHA(source), r.candidateSource); err != nil {
 		m.rejectLocked(id, r, "write_failed")
+		if errors.Is(err, atomicwriter.ErrConflict) {
+			return Receipt{}, ErrStale
+		}
 		return Receipt{}, err
 	}
 	r.state = Committed
