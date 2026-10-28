@@ -169,5 +169,8 @@ func (a *Auditor) Audit(ctx context.Context) (report Report, err error) {
 	if err := assess(hostNS, child); err != nil {
 		return Report{}, err
 	}
-	return Report{Host: hostNS, Child: child, Backend: "bubblewrap"}, nil
+	if err := auditDaemon(ctx, bwrapPath, binary, hostNS); err != nil {
+		return Report{}, err
+	}
+	return Report{Host: hostNS, Child: child, Backend: "bubblewrap", ProcessContained: true}, nil
 }

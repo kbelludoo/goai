@@ -182,3 +182,13 @@ host access. The helper never runs agent code, and this preflight is not yet
 part of a production sandbox validator; `TxManager` **still cannot approve**.
 On platforms without `bwrap` this stage cannot be validated end-to-end. See
 [stage 2 threat model and opt-in test](docs/sandbox-stage-2.md).
+
+
+## GoAI sandbox stage 3: detached-process canary
+
+`internal/sandboxcheck` additionally tests the cleanup of a trusted `setsid`
+process inside a Bubblewrap PID namespace. It uses a host-visible, nonce-bound
+`/proc` scanner with a *positive live-daemon control* before termination.
+See [the stage-3 design](docs/sandbox-stage-3.md). The real isolation test is
+opt-in; neither these canaries nor `CGO_ENABLED=0` prove a safe untrusted
+executor. The public transaction manager still cannot authorize commits.
