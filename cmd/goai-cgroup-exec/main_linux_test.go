@@ -60,7 +60,7 @@ func TestUntrustworthyAuthorityRefuses(t *testing.T) {
 
 func TestNoSupervisorSocketRefuses(t *testing.T) {
 	policyPath := writePolicy(t, uint32(os.Geteuid()))
-	out, code := runLauncher(t, []string{"GOAI_AUTHORITY_CONFIG=" + policyPath}, nil, nil)
+	out, code := runLauncher(t, []string{"GOAI_AUTHORITY_CONFIG=" + policyPath}, nil)
 	if code == 0 || !strings.Contains(out, "supervisor socket") {
 		t.Fatalf("launched without a supervisor channel: code=%d out=%q", code, out)
 	}
